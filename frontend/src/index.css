@@ -1,0 +1,27 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color: #f4f6ff;
+    background: #05060c;
+    font-family: "Inter", "Space Grotesk", system-ui, sans-serif;
+  }
+  body {
+    @apply min-h-screen bg-night text-slate-100;
+    background: radial-gradient(circle at 20% 20%, #12204a, #05060c 55%), radial-gradient(circle at 80% 0%, #1b2b5c, transparent 45%), #05060c;
+  }
+}
+
+@layer components {
+  .glass-card {
+    @apply bg-card border border-border rounded-2xl shadow-glass;
+  }
+  .primary-btn {
+    @apply bg-gradient-to-r from-accent to-accent2 text-night font-semibold rounded-xl px-4 py-2 hover:brightness-110 transition;
+  }
+  .ghost-btn {
+    @apply border border-border text-slate-100 rounded-xl px-4 py-2 hover:bg-card;
+  }
+}
