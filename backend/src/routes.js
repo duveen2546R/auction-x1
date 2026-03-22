@@ -76,10 +76,16 @@ router.get("/rooms/:roomId/players-status", async (req, res) => {
     const [sold] = await pool.query(
       `SELECT c.id, c.name, c.role, c.batting_rating, c.bowling_rating, c.rating, c.base_price, c.country, tp.price
        FROM team_players tp
+       JOIN (
+         SELECT player_id, MAX(id) AS latest_id
+         FROM team_players
+         WHERE room_id = ?
+         GROUP BY player_id
+       ) latest ON latest.latest_id = tp.id
        JOIN cricketers c ON c.id = tp.player_id
        WHERE tp.room_id = ?
        ORDER BY c.role, c.name`,
-      [room.id]
+      [room.id, room.id]
     );
 
     const [remaining] = await pool.query(
@@ -101,10 +107,16 @@ router.get("/rooms/:roomId/players-status", async (req, res) => {
       const [teamRows] = await pool.query(
         `SELECT c.id, c.name, c.role, c.batting_rating, c.bowling_rating, c.rating, c.base_price, c.country, tp.price
          FROM team_players tp
+         JOIN (
+           SELECT player_id, MAX(id) AS latest_id
+           FROM team_players
+           WHERE room_id = ? AND user_id = ?
+           GROUP BY player_id
+         ) latest ON latest.latest_id = tp.id
          JOIN cricketers c ON c.id = tp.player_id
          WHERE tp.room_id = ? AND tp.user_id = ?
          ORDER BY c.role, c.name`,
-        [room.id, resolvedUserId]
+        [room.id, resolvedUserId, room.id, resolvedUserId]
       );
       userTeam = teamRows;
 
@@ -172,10 +184,16 @@ router.get("/rooms/:roomId/purses", async (req, res) => {
     const [purchasedPlayers] = await pool.query(
       `SELECT tp.user_id AS "userId", c.id, c.name, c.role, c.country, tp.price
        FROM team_players tp
+       JOIN (
+         SELECT player_id, MAX(id) AS latest_id
+         FROM team_players
+         WHERE room_id = ?
+         GROUP BY player_id
+       ) latest ON latest.latest_id = tp.id
        JOIN cricketers c ON c.id = tp.player_id
        WHERE tp.room_id = ?
        ORDER BY tp.user_id, tp.id`,
-      [room.id]
+      [room.id, room.id]
     );
 
     const playersByUser = new Map();

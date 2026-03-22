@@ -62,6 +62,7 @@ function createRoom(roomId) {
     blockedUsers: new Set(),
     playing11: new Map(),
     disqualified: new Set(),
+    finalizingBid: false,
   };
 }
 
@@ -220,6 +221,50 @@ async function persistPlaying11(roomDbId, userId, lineup, score) {
   }
 }
 
+async function getRoomPursesSnapshot(roomDbId) {
+  const [purses] = await pool.query(
+    `SELECT rp.user_id AS "userId", u.username, rp.team_name AS "teamName", rp.budget
+     FROM room_players rp
+     JOIN (
+       SELECT user_id, MAX(id) AS latest_id
+       FROM room_players
+       WHERE room_id = ?
+       GROUP BY user_id
+     ) latest ON latest.latest_id = rp.id
+     JOIN users u ON u.id = rp.user_id
+     WHERE rp.room_id = ?
+     ORDER BY rp.team_name, u.username`,
+    [roomDbId, roomDbId]
+  );
+
+  const [purchasedPlayers] = await pool.query(
+    `SELECT tp.user_id AS "userId", c.id, c.name, c.role, c.country, tp.price
+     FROM team_players tp
+     JOIN (
+       SELECT player_id, MAX(id) AS latest_id
+       FROM team_players
+       WHERE room_id = ?
+       GROUP BY player_id
+     ) latest ON latest.latest_id = tp.id
+     JOIN cricketers c ON c.id = tp.player_id
+     WHERE tp.room_id = ?
+     ORDER BY tp.user_id, tp.id`,
+    [roomDbId, roomDbId]
+  );
+
+  const playersByUser = new Map();
+  for (const player of purchasedPlayers) {
+    const existing = playersByUser.get(player.userId) || [];
+    existing.push(player);
+    playersByUser.set(player.userId, existing);
+  }
+
+  return purses.map((entry) => ({
+    ...entry,
+    players: playersByUser.get(entry.userId) || [],
+  }));
+}
+
 function broadcastPlayers(roomId) {
   const room = rooms.get(roomId);
   if (!room) return;
@@ -347,6 +392,7 @@ function evaluatePlaying11(room, socketId, playerIds) {
 function startNextPlayer(roomId) {
   const room = rooms.get(roomId);
   if (!room) return;
+  room.finalizingBid = false;
   if (room.timer) {
     clearInterval(room.timer);
     room.timer = null;
@@ -387,66 +433,109 @@ function startNextPlayer(roomId) {
 
 async function finalizeBid(roomId) {
   const room = rooms.get(roomId);
-  if (!room || !room.currentPlayer) return;
+  if (!room || !room.currentPlayer || room.finalizingBid) return;
+
+  room.finalizingBid = true;
+  const soldPlayer = { ...room.currentPlayer };
+  const soldPrice = Number(room.currentBid || soldPlayer.base_price || 0);
 
   const [winnerSocketId, liveWinner] = getHighestBidderEntry(room);
   const winnerUserId = liveWinner?.userId || room.highestBidderUserId || null;
   const winnerName = liveWinner?.username || room.highestBidderName || null;
 
-  if (winnerUserId || liveWinner) {
-    let nextBudget = Math.max(0, Number(liveWinner?.budget ?? 100) - Number(room.currentBid || 0));
+  try {
+    if (winnerUserId || liveWinner) {
+      let nextBudget = Math.max(0, Number(liveWinner?.budget ?? 100) - soldPrice);
+      let salePersisted = false;
+      let saleAlreadyExists = false;
 
-    if (liveWinner) {
-      const alreadyOwned = liveWinner.team.some((player) => player.id === room.currentPlayer.id);
-      if (!alreadyOwned) {
-        liveWinner.team.push({ ...room.currentPlayer, price: room.currentBid });
+      if (liveWinner) {
+        const alreadyOwned = liveWinner.team.some((player) => player.id === soldPlayer.id);
+        if (!alreadyOwned) {
+          liveWinner.team.push({ ...soldPlayer, price: soldPrice });
+        }
+        liveWinner.score = calculateScore(liveWinner.team);
       }
-      liveWinner.score = calculateScore(liveWinner.team);
-      liveWinner.budget = nextBudget;
-    }
 
-    if (room.dbId && winnerUserId) {
-      try {
-        if (!liveWinner) {
+      if (!liveWinner && room.dbId && winnerUserId) {
           const [budgetRows] = await pool.query(
             "SELECT budget FROM room_players WHERE room_id = ? AND user_id = ? LIMIT 1",
             [room.dbId, winnerUserId]
           );
-          nextBudget = Math.max(0, Number(budgetRows[0]?.budget ?? 100) - Number(room.currentBid || 0));
-        }
+          nextBudget = Math.max(0, Number(budgetRows[0]?.budget ?? 100) - soldPrice);
+      }
 
-        await pool.query(
-          "INSERT INTO team_players (room_id, user_id, player_id, price) VALUES (?, ?, ?, ?)",
-          [room.dbId, winnerUserId, room.currentPlayer.id, room.currentBid]
-        );
-        await pool.query(
-          "UPDATE room_players SET budget = ? WHERE room_id = ? AND user_id = ?",
-          [nextBudget, room.dbId, winnerUserId]
-        );
+      if (room.dbId && winnerUserId) {
+        try {
+          const [existingSales] = await pool.query(
+            "SELECT id, user_id, price FROM team_players WHERE room_id = ? AND player_id = ? ORDER BY id DESC LIMIT 1",
+            [room.dbId, soldPlayer.id]
+          );
+
+          if (existingSales.length) {
+            saleAlreadyExists = true;
+            if (!liveWinner && existingSales[0].user_id === winnerUserId) {
+              const [budgetRows] = await pool.query(
+                "SELECT budget FROM room_players WHERE room_id = ? AND user_id = ? LIMIT 1",
+                [room.dbId, winnerUserId]
+              );
+              nextBudget = Number(budgetRows[0]?.budget ?? nextBudget);
+            }
+          } else {
+            await pool.query(
+              "INSERT INTO team_players (room_id, user_id, player_id, price) VALUES (?, ?, ?, ?)",
+              [room.dbId, winnerUserId, soldPlayer.id, soldPrice]
+            );
+            await pool.query(
+              "UPDATE room_players SET budget = ? WHERE room_id = ? AND user_id = ?",
+              [nextBudget, room.dbId, winnerUserId]
+            );
+            salePersisted = true;
+          }
+        } catch (err) {
+          console.error("Failed to persist team winner", formatDbError(err));
+          room.finalizingBid = false;
+          return;
+        }
+      }
+
+      if (liveWinner) {
+        liveWinner.budget = nextBudget;
+      }
+      if (winnerSocketId) {
+        io.to(winnerSocketId).emit("budget_update", { budget: nextBudget });
+      }
+
+      io.to(roomId).emit("player_won", {
+        player: { ...soldPlayer, price: soldPrice },
+        winner: winnerName,
+        winnerUserId,
+        price: soldPrice,
+        budget: nextBudget,
+        duplicatedSaleIgnored: saleAlreadyExists && !salePersisted,
+      });
+    } else {
+      io.to(roomId).emit("player_won", {
+        player: soldPlayer,
+        winner: null,
+      });
+    }
+
+    if (room.dbId) {
+      try {
+        const purses = await getRoomPursesSnapshot(room.dbId);
+        io.to(roomId).emit("purses_update", {
+          roomId,
+          roomDbId: room.dbId,
+          purses,
+        });
       } catch (err) {
-        console.error("Failed to persist team winner", formatDbError(err));
+        console.error("Failed to broadcast purses", formatDbError(err));
       }
     }
-
-    if (liveWinner) {
-      liveWinner.budget = nextBudget;
-    }
-    if (winnerSocketId) {
-      io.to(winnerSocketId).emit("budget_update", { budget: nextBudget });
-    }
-    io.to(roomId).emit("player_won", {
-      player: room.currentPlayer,
-      winner: winnerName,
-      price: room.currentBid,
-    });
-  } else {
-    io.to(roomId).emit("player_won", {
-      player: room.currentPlayer,
-      winner: null,
-    });
+  } finally {
+    setTimeout(() => startNextPlayer(roomId), 1500);
   }
-
-  setTimeout(() => startNextPlayer(roomId), 1500);
 }
 
 function endAuction(roomId) {
