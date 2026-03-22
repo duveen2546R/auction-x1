@@ -360,8 +360,7 @@ function evaluatePlaying11(room, socketId, playerIds) {
 
     if (isAr) {
       ars += 1;
-      bats += 1;
-      bowls += 1;
+      // All-rounder counts as AR only (not in Bat/Bowl categories for rule validation)
       battingTotal += batR;
       bowlingTotal += bowlR;
     } else {
@@ -596,11 +595,12 @@ function endAuction(roomId) {
 
     const feasible =
       total >= 11 &&
-      (bats + ars) >= 4 &&
-      (bowls + ars) >= 3 &&
+      bats >= 3 &&
+      bowls >= 2 &&
       wks >= 1 &&
-      ars >= 1 &&
-      locals >= 7; // to satisfy max 4 overseas
+      locals >= 7; // to satisfy max 4 overseas (total 11 - max 4 OS = min 7 locals)
+    // Note: ars is already limited by the 4-max rule during selection, 
+    // and here we check if pure roles meet the minimum requirements.
 
     if (!feasible) disqualified.add(sid);
   });
