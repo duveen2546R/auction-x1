@@ -89,10 +89,14 @@ export default function Auction() {
             if (!res.ok) throw new Error(`status ${res.status}`);
             const data = await res.json();
             setPurses(data.purses || []);
+            const ownPurse = (data.purses || []).find((entry) => Number(entry.userId) === Number(userId));
+            if (ownPurse && typeof ownPurse.budget !== "undefined") {
+                setBudget(Number(ownPurse.budget));
+            }
         } catch (err) {
             console.warn("Failed to load purses", err.message);
         }
-    }, [apiBase, roomId]);
+    }, [apiBase, roomId, userId]);
 
     useEffect(() => {
         if (roomId) {
@@ -118,8 +122,15 @@ export default function Auction() {
         });
 
         socket.on("player_won", (data) => {
-            if (data.isYou || (!data.isYou && data.winner === username)) {
+            const currentUserWon =
+                Number(data?.winnerUserId) === Number(userId) ||
+                (!data?.winnerUserId && data?.winner === username);
+
+            if (currentUserWon) {
                 setTeam((prev) => (prev.some((player) => player.id === data.player?.id) ? prev : [...prev, data.player]));
+                if (typeof data?.budget === "number") {
+                    setBudget(Number(data.budget));
+                }
             }
             setWarning(null);
             setHasPassed(false);
@@ -152,6 +163,15 @@ export default function Auction() {
 
         socket.on("budget_update", (b) => {
             if (typeof b?.budget === "number") setBudget(Number(b.budget));
+        });
+
+        socket.on("purses_update", (payload) => {
+            const nextPurses = payload?.purses || [];
+            setPurses(nextPurses);
+            const ownPurse = nextPurses.find((entry) => Number(entry.userId) === Number(userId));
+            if (ownPurse && typeof ownPurse.budget !== "undefined") {
+                setBudget(Number(ownPurse.budget));
+            }
         });
 
         socket.on("queue_update", (q) => {
