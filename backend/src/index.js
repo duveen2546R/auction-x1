@@ -722,12 +722,10 @@ function handleBid(socket, amount) {
   if (room.passedUsers.has(socket.id)) return;
   if (room.highestBidder === socket.id) return; // prevent consecutive self-bids
 
-  const numericBid = Number(amount);
-  const step =
-    room.currentBid < 12 ? 0.1 :
-    room.currentBid < 20 ? 0.25 :
-    0.5;
-  if (Number.isNaN(numericBid) || numericBid < room.currentBid + step - 1e-9) return;
+  const numericBid = Math.round(Number(amount) * 100) / 100;
+  const currentBidRounded = Math.round(room.currentBid * 100) / 100;
+  const step = currentBidRounded < 10 ? 0.2 : 0.5;
+  if (Number.isNaN(numericBid) || numericBid < currentBidRounded + step - 1e-9) return;
 
   const user = room.users.get(socket.id);
   if (user && numericBid > (user.budget ?? 100)) {
@@ -753,10 +751,7 @@ function handleBid(socket, amount) {
     amount: room.currentBid,
     by: socket.data.username,
     history: room.bidHistory.slice(-10),
-    step:
-      room.currentBid < 12 ? 0.1 :
-      room.currentBid < 20 ? 0.25 :
-      0.5,
+    step: room.currentBid < 10 ? 0.2 : 0.5,
   });
   maybeAutoResolve(roomId);
 
@@ -884,10 +879,7 @@ io.on("connection", (socket) => {
       amount: room.currentBid,
       by: getHighestBidderName(room),
       history: room.bidHistory || [],
-      step:
-        room.currentBid < 12 ? 0.1 :
-        room.currentBid < 20 ? 0.25 :
-        0.5,
+      step: room.currentBid < 10 ? 0.2 : 0.5,
     });
     socket.emit("queue_update", getQueueState(room));
     socket.emit("budget_update", { budget: mergedBudget });

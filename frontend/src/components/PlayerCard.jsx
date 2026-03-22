@@ -30,7 +30,7 @@ export default function PlayerCard({ player }) {
                                 {player.name}
                             </h2>
                             <p className="text-slate-400 text-sm font-medium tracking-wide">
-                                Base Price: <span className="text-white font-bold">₹{player.base_price} Cr</span>
+                                Base Price: <span className="text-white font-bold">₹{Number(player.base_price || 0).toFixed(2)} Cr</span>
                             </p>
                         </div>
                         

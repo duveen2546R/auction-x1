@@ -89,7 +89,9 @@ export default function Auction() {
             if (data.counts) {
                 setQueueInfo((prev) => ({
                     ...prev,
-                    completed: typeof data.counts.sold === 'number' ? data.counts.sold : prev.completed,
+                    completed: (typeof data.counts.sold === 'number' && typeof data.counts.unsold === 'number') 
+                        ? (data.counts.sold + data.counts.unsold) 
+                        : (typeof data.counts.sold === 'number' ? data.counts.sold : prev.completed),
                     remaining: typeof data.counts.remaining === 'number' ? data.counts.remaining : prev.remaining,
                 }));
             }
@@ -130,7 +132,7 @@ export default function Auction() {
             setLastBidder(null);
             setWarning(null);
             const base = Number(player.base_price || 0);
-            setStep(base < 12 ? 0.1 : base < 20 ? 0.25 : 0.5);
+            setStep(base < 10 ? 0.2 : 0.5);
         });
 
         socket.on("bid_update", (payload) => {
@@ -253,6 +255,7 @@ export default function Auction() {
     };
 
     const withdraw = () => {
+        if (!window.confirm("Are you sure? You will exit the bidding for the ENTIRE auction session. This cannot be undone.")) return;
         setEliminated(true);
         socket.emit("withdraw_bid");
     };
@@ -270,7 +273,7 @@ export default function Auction() {
         setChatInput("");
     };
 
-    const completedCount = Number(queueInfo.completed ?? playerStatus?.sold?.length ?? 0);
+    const completedCount = Number(queueInfo.completed ?? (playerStatus?.sold?.length + playerStatus?.unsold?.length) ?? 0);
     const remainingCount = Number(queueInfo.remaining ?? playerStatus?.remaining?.length ?? 0);
     const totalCount = completedCount + remainingCount;
 
@@ -358,6 +361,18 @@ export default function Auction() {
                                 BIDDING
                             </div>
 
+                            {eliminated && (
+                                <div className="absolute inset-0 z-20 bg-black/60 backdrop-blur-sm flex items-center justify-center">
+                                    <div className="text-center p-8 bg-white/5 border border-white/10 rounded-3xl max-w-sm animate-slide-up">
+                                        <div className="text-rose-500 text-6xl font-black italic uppercase tracking-tighter mb-4">EXITED</div>
+                                        <p className="text-xs font-black uppercase tracking-[0.2em] text-white italic">You have withdrawn from the bidding.</p>
+                                        <p className="text-[10px] text-slate-500 font-bold mt-4 uppercase tracking-widest leading-relaxed">
+                                            Awaiting auction finale to finalize Playing XI selection.
+                                        </p>
+                                    </div>
+                                </div>
+                            )}
+
                             <div className="relative z-10 flex flex-col md:flex-row justify-between items-end gap-8">
                                 <div className="space-y-4">
                                     <div className="flex flex-col">
@@ -413,7 +428,7 @@ export default function Auction() {
                                                 <span className="text-white font-bold text-sm uppercase italic tracking-tight">{h.by || "—"}</span>
                                                 <span className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">{h.note || "BID"}</span>
                                             </div>
-                                            <span className="text-lg font-black text-accent italic tracking-tighter">₹{h.amount} Cr</span>
+                                            <span className="text-lg font-black text-accent italic tracking-tighter">₹{Number(h.amount).toFixed(2)} Cr</span>
                                         </div>
                                     ))}
                                 </div>

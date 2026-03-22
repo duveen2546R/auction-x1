@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
-import { useLocation } from "react-router-dom";
+import { useEffect, useMemo, useState, useCallback } from "react";
+import { useLocation, useNavigate } from "react-router-dom";
 import socket from "../socket";
 
 function validateLineup(team, ids) {
@@ -20,8 +20,7 @@ function validateLineup(team, ids) {
         const bowlR = Number(p.bowling_rating ?? p.rating ?? 0);
         if (isAr) {
             roleCounts.ar += 1;
-            roleCounts.bat += 1;
-            roleCounts.bowl += 1;
+            // All-rounder counts as AR only (not in Bat/Bowl categories for rule validation)
             battingTotal += batR;
             bowlingTotal += bowlR;
         } else {
@@ -44,6 +43,7 @@ function validateLineup(team, ids) {
 
 export default function Result() {
     const { state } = useLocation();
+    const navigate = useNavigate();
     const team = state?.team || [];
     const isDisqualified = state?.disqualified;
     const deadline = state?.deadline || null;
@@ -53,6 +53,30 @@ export default function Result() {
     const [results, setResults] = useState(null);
     const [winner, setWinner] = useState(null);
     const [remaining, setRemaining] = useState(null);
+
+    const teamName = localStorage.getItem("teamName") || "";
+    const username = localStorage.getItem("username") || "Player";
+
+    const slugMap = {
+        "royal challengers bangalore": "banglore",
+        "chennai super kings": "chennai",
+        "delhi capitals": "delhi",
+        "gujarat titans": "gujarat",
+        "sunrisers hyderabad": "hyderabad",
+        "kolkata knight riders": "kolkata",
+        "lucknow super giants": "lucknow",
+        "mumbai indians": "mumbai",
+        "punjab kings": "punjab",
+        "rajasthan royals": "rajasthan",
+    };
+    
+    const bgSlug = useMemo(() => {
+        try {
+            return teamName ? slugMap[teamName.toLowerCase()] || null : null;
+        } catch (e) {
+            return null;
+        }
+    }, [teamName]);
 
     useEffect(() => {
         const onResults = (payload) => {
@@ -97,7 +121,9 @@ export default function Result() {
         if (selected.includes(id)) {
             setSelected(selected.filter((x) => x !== id));
         } else {
-            setSelected([...selected, id].slice(0, 11));
+            if (selected.length < 11) {
+                setSelected([...selected, id]);
+            }
         }
     };
 
@@ -114,71 +140,202 @@ export default function Result() {
     };
 
     return (
-        <div className="min-h-screen bg-night text-slate-100 px-4 py-6">
-            <div className="max-w-6xl mx-auto grid lg:grid-cols-[2fr_1fr] gap-4">
-                <div className="glass-card border border-border p-5 space-y-4">
-                    <div>
-                        <h1 className="text-3xl font-semibold">Choose Your Best XI</h1>
-                        <p className="text-slate-400 text-sm">
-                            Rules: 11 players, ≥3 batsmen, ≥2 bowlers, ≥1 wicketkeeper, max 4 all-rounders, max 4 overseas.
-                            {remaining !== null && ` · Auto-submit in ${remaining}s`}
-                        </p>
-                        {isDisqualified && <p className="text-amber-400 text-sm mt-2">You are disqualified (insufficient squad to meet rules).</p>}
+        <div
+            className="min-h-screen text-slate-100 px-4 py-8"
+            style={
+                bgSlug
+                    ? {
+                          backgroundImage: `linear-gradient(180deg, rgba(2,4,8,0.7) 0%, rgba(2,4,8,0.95) 100%), url(/img/${bgSlug}.png)`,
+                          backgroundSize: "cover",
+                          backgroundPosition: "center",
+                          backgroundAttachment: "fixed"
+                      }
+                    : { backgroundColor: "#020408" }
+            }
+        >
+            <div className="max-w-7xl mx-auto space-y-8">
+                {/* Header Section */}
+                <header className="flex flex-col md:flex-row items-center justify-between gap-6 pb-8 border-b border-white/5">
+                    <div className="flex items-center gap-6">
+                        <div>
+                            <h1 className="text-sm font-black text-accent tracking-[0.3em] uppercase mb-1">Squad Finalization</h1>
+                            <div className="flex items-center gap-3">
+                                <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                                <h2 className="text-3xl font-bold tracking-tight text-white uppercase italic">
+                                    THE <span className="text-slate-500">PLAYING XI</span>
+                                </h2>
+                            </div>
+                        </div>
                     </div>
 
-                    <div className="glass-card border border-border p-3 max-h-[480px] overflow-y-auto">
-                        <h3 className="font-semibold mb-2">Your squad ({team.length})</h3>
-                        {team.map((p) => {
-                            const checked = selected.includes(p.id);
-                            const overseas = (p.country || "").toLowerCase() !== "india";
-                            return (
-                                <div key={p.id} className="flex justify-between items-center border-b border-border/60 py-2 text-sm">
-                                    <label className="flex items-center gap-2">
-                                        <input
-                                            type="checkbox"
-                                            className="accent-accent"
-                                            checked={checked}
-                                            onChange={() => toggle(p.id)}
-                                        />
-                                        <span>{p.name}</span>
-                                        <span className="text-slate-400">[{p.role}]</span>
-                                        {overseas && <span className="pill tiny">OS</span>}
-                                    </label>
-                                    <span className="text-slate-400">Bat ⭐ {p.batting_rating ?? p.rating} · Bowl ⭐ {p.bowling_rating ?? p.rating}</span>
+                    <div className="flex items-center gap-8">
+                        {remaining !== null && (
+                            <div className="flex flex-col items-end">
+                                <span className="text-[10px] text-slate-500 font-bold uppercase tracking-widest mb-1">Submission Deadline</span>
+                                <span className="text-lg font-black text-rose-500 italic">{remaining}s <span className="text-xs text-slate-500 font-medium tracking-normal not-italic">REMAINING</span></span>
+                            </div>
+                        )}
+                        <div className="h-10 w-px bg-white/10 hidden md:block"></div>
+                        <div className="flex flex-col items-end">
+                            <span className="text-[10px] text-slate-500 font-bold uppercase tracking-widest mb-1">Selected</span>
+                            <span className="text-lg font-black text-white italic">{selected.length} <span className="text-xs text-slate-500 font-medium tracking-normal not-italic">/ 11 Players</span></span>
+                        </div>
+                    </div>
+                </header>
+
+                <div className="grid gap-8 lg:grid-cols-[1fr_380px]">
+                    <main className="space-y-8 animate-slide-up">
+                        <section className="glass-card p-6 space-y-6">
+                            <div className="flex items-center justify-between border-b border-white/5 pb-4">
+                                <span className="text-xs font-black uppercase tracking-widest italic text-white">Squad Selection Pool</span>
+                                {isDisqualified && <span className="text-[10px] font-bold uppercase tracking-widest text-rose-500">DISQUALIFIED</span>}
+                            </div>
+
+                            <div className="grid gap-3 max-h-[600px] overflow-y-auto pr-2 custom-scrollbar">
+                                {team.map((p) => {
+                                    const checked = selected.includes(p.id);
+                                    const overseas = (p.country || "").toLowerCase() !== "india";
+                                    return (
+                                        <div 
+                                            key={p.id} 
+                                            className={`flex items-center justify-between p-4 rounded-2xl border transition-all cursor-pointer ${
+                                                checked 
+                                                ? "bg-accent/10 border-accent/30 shadow-[0_0_20px_rgba(var(--accent-rgb),0.1)]" 
+                                                : "bg-white/5 border-white/5 hover:bg-white/10"
+                                            }`}
+                                            onClick={() => toggle(p.id)}
+                                        >
+                                            <div className="flex items-center gap-4">
+                                                <div className={`w-5 h-5 rounded-md border flex items-center justify-center transition-colors ${
+                                                    checked ? "bg-accent border-accent" : "border-white/20"
+                                                }`}>
+                                                    {checked && (
+                                                        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="black" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
+                                                    )}
+                                                </div>
+                                                <div className="flex flex-col">
+                                                    <div className="flex items-center gap-2">
+                                                        <span className="text-white font-bold text-sm uppercase italic tracking-tight">{p.name}</span>
+                                                        {overseas && <span className="text-[8px] font-black px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-500 border border-amber-500/20 uppercase">OS</span>}
+                                                    </div>
+                                                    <span className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">{p.role}</span>
+                                                </div>
+                                            </div>
+                                            <div className="flex items-center gap-6">
+                                                <div className="flex flex-col items-end">
+                                                    <span className="text-[8px] text-slate-500 font-black uppercase tracking-widest">BAT</span>
+                                                    <span className="text-sm font-black text-white italic">⭐ {p.batting_rating ?? p.rating}</span>
+                                                </div>
+                                                <div className="flex flex-col items-end">
+                                                    <span className="text-[8px] text-slate-500 font-black uppercase tracking-widest">BOWL</span>
+                                                    <span className="text-sm font-black text-white italic">⭐ {p.bowling_rating ?? p.rating}</span>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+
+                            <div className="bg-white/5 border border-white/5 p-6 rounded-2xl space-y-6">
+                                <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
+                                    {[
+                                        { label: "BATTERS", val: validation.roleCounts.bat, min: 3 },
+                                        { label: "BOWLERS", val: validation.roleCounts.bowl, min: 2 },
+                                        { label: "KEEPERS", val: validation.roleCounts.wk, min: 1 },
+                                        { label: "AR", val: validation.roleCounts.ar, max: 4 },
+                                        { label: "OVERSEAS", val: validation.roleCounts.overseas, max: 4 },
+                                    ].map((stat, i) => (
+                                        <div key={i} className="flex flex-col items-center p-3 bg-white/5 rounded-xl border border-white/5">
+                                            <span className="text-[8px] text-slate-500 font-black uppercase tracking-widest mb-1">{stat.label}</span>
+                                            <span className={`text-xl font-black italic ${
+                                                (stat.min && stat.val < stat.min) || (stat.max && stat.val > stat.max) 
+                                                ? "text-rose-500" 
+                                                : "text-accent"
+                                            }`}>{stat.val}</span>
+                                            {stat.min && <span className="text-[8px] text-slate-600 font-bold mt-1">MIN {stat.min}</span>}
+                                            {stat.max && <span className="text-[8px] text-slate-600 font-bold mt-1">MAX {stat.max}</span>}
+                                        </div>
+                                    ))}
                                 </div>
-                            );
-                        })}
-                    </div>
 
-                    <div className="glass-card border border-border p-3">
-                        <p className="text-sm">Selected: {selected.length}/11</p>
-                        <p className="text-sm text-slate-300">Batters: {validation.roleCounts.bat} | Bowlers: {validation.roleCounts.bowl} | Keepers: {validation.roleCounts.wk} | All-rounders: {validation.roleCounts.ar} | Overseas: {validation.roleCounts.overseas}</p>
-                        {!validation.ok && <p className="text-amber-400 text-sm">Fix: {validation.errors.join(", ")}</p>}
-                        {error && <p className="text-amber-400 text-sm">Error: {error}</p>}
-                        <button className="primary-btn mt-2" onClick={submit} disabled={!validation.ok || submitting || isDisqualified}>
-                            {submitting ? "Waiting for others..." : "Submit Playing XI"}
-                        </button>
-                    </div>
-                </div>
+                                {(!validation.ok || error) && (
+                                    <div className="p-4 bg-rose-500/10 border border-rose-500/20 rounded-xl">
+                                        <p className="text-xs font-bold text-rose-500 uppercase tracking-widest italic">
+                                            {error ? `ERROR: ${error}` : `REQUIREMENTS: ${validation.errors.join(" | ")}`}
+                                        </p>
+                                    </div>
+                                )}
 
-                <div className="glass-card border border-border p-4 space-y-3">
-                    <h3 className="font-semibold">Final Scores</h3>
-                    {results ? (
-                        <>
-                            <p className="text-lg">Winner: {winner}</p>
-                            {results.map((r, idx) => (
-                                <div key={idx} className="border-b border-border/60 py-2 text-sm">
-                                    <div className="font-semibold">{r.username}</div>
-                                    <div>Score: {r.score.toFixed(1)}</div>
-                                    <div className="text-slate-400">Bat {r.breakdown.battingTotal} · Bowl {r.breakdown.bowlingTotal} · Bonus {r.breakdown.balanceBonus}</div>
-                                </div>
-                            ))}
-                        </>
-                    ) : (
-                        <p className="text-slate-400 text-sm">Awaiting submissions...</p>
-                    )}
+                                <button 
+                                    className="primary-btn w-full !py-4 !rounded-xl text-sm font-black tracking-[0.2em] uppercase italic disabled:opacity-30 disabled:cursor-not-allowed" 
+                                    onClick={submit} 
+                                    disabled={!validation.ok || submitting || isDisqualified}
+                                >
+                                    {submitting ? (
+                                        <span className="flex items-center justify-center gap-2">
+                                            <span className="w-2 h-2 rounded-full bg-white animate-pulse"></span>
+                                            AWAITING ALL TEAMS...
+                                        </span>
+                                    ) : (
+                                        "LOCK IN PLAYING XI"
+                                    )}
+                                </button>
+                            </div>
+                        </section>
+                    </main>
+
+                    <aside className="space-y-6">
+                        <section className="glass-card p-6 flex flex-col h-full">
+                            <div className="flex items-center justify-between mb-6">
+                                <span className="text-xs font-black uppercase tracking-widest italic text-white">Live Leaderboard</span>
+                                <span className="w-2 h-2 rounded-full bg-rose-500 animate-pulse"></span>
+                            </div>
+
+                            <div className="flex-1 space-y-4">
+                                {results ? (
+                                    <>
+                                        <div className="p-4 bg-accent/20 border border-accent/30 rounded-2xl mb-6">
+                                            <span className="text-[10px] text-accent font-black uppercase tracking-widest">Current Winner</span>
+                                            <h3 className="text-2xl font-black text-white italic uppercase tracking-tight truncate">{winner}</h3>
+                                        </div>
+                                        <div className="space-y-3 overflow-y-auto max-h-[500px] pr-2 custom-scrollbar">
+                                            {results.map((r, idx) => (
+                                                <div key={idx} className="flex justify-between items-center bg-white/5 border border-white/5 p-4 rounded-xl hover:bg-white/10 transition">
+                                                    <div className="flex flex-col">
+                                                        <span className="text-white font-bold text-sm uppercase italic tracking-tight">{r.username}</span>
+                                                        <div className="flex gap-2 mt-1">
+                                                            <span className="text-[8px] text-slate-500 font-bold uppercase tracking-widest">B {r.breakdown.battingTotal}</span>
+                                                            <span className="text-[8px] text-slate-500 font-bold uppercase tracking-widest">W {r.breakdown.bowlingTotal}</span>
+                                                        </div>
+                                                    </div>
+                                                    <div className="flex flex-col items-end">
+                                                        <span className="text-lg font-black text-accent italic tracking-tighter">{r.score.toFixed(1)}</span>
+                                                        <span className="text-[8px] text-slate-600 font-bold uppercase tracking-widest">POINTS</span>
+                                                    </div>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </>
+                                ) : (
+                                    <div className="flex flex-col items-center justify-center h-64 text-center space-y-4">
+                                        <div className="w-12 h-12 border-4 border-white/10 border-t-accent rounded-full animate-spin"></div>
+                                        <p className="text-xs font-bold text-slate-500 uppercase tracking-[0.2em] italic">Calculations in progress...</p>
+                                    </div>
+                                )}
+                            </div>
+
+                            <button 
+                                className="mt-8 text-[10px] font-black uppercase tracking-[0.3em] text-slate-500 hover:text-white transition-colors flex items-center justify-center gap-2"
+                                onClick={() => navigate("/")}
+                            >
+                                <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="m15 18-6-6 6-6"/></svg>
+                                RETURN TO ARENA
+                            </button>
+                        </section>
+                    </aside>
                 </div>
             </div>
         </div>
     );
 }
+
