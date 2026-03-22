@@ -11,9 +11,9 @@ function validateLineup(team, ids) {
     lineup.forEach((p) => {
         const role = (p.role || "").toLowerCase();
         const isAr = role.includes("all");
-        const isBat = role.includes("bat");
-        const isBowl = role.includes("bowl");
-        const isWk = role.includes("keep");
+        const isBat = role.includes("bat") || role.includes("open") || role.includes("middle");
+        const isBowl = role.includes("bowl") || role.includes("pace") || role.includes("spin");
+        const isWk = role.includes("keep") || role.includes("wk");
         const isOverseas = (p.country || "").toLowerCase() !== "india";
         if (isOverseas) roleCounts.overseas += 1;
         const batR = Number(p.batting_rating ?? p.rating ?? 0);
@@ -27,7 +27,7 @@ function validateLineup(team, ids) {
         } else {
             if (isBat) { roleCounts.bat += 1; battingTotal += batR; }
             if (isBowl) { roleCounts.bowl += 1; bowlingTotal += bowlR; }
-            if (isWk) { roleCounts.wk += 1; battingTotal += batR; }
+            if (isWk) { roleCounts.wk += 1; roleCounts.bat += 1; battingTotal += batR; }
         }
     });
 

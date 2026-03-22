@@ -74,7 +74,9 @@ router.get("/rooms/:roomId/players-status", async (req, res) => {
     }
 
     const [sold] = await pool.query(
-      `SELECT c.id, c.name, c.role, c.batting_rating, c.bowling_rating, c.rating, c.base_price, c.country, tp.price
+      `SELECT 
+         c.id, c.name, c.role, c.batting_rating, c.bowling_rating, c.rating, c.base_price, c.country, 
+         tp.price, COALESCE(rp.team_name, u.username) AS "soldTo"
        FROM team_players tp
        JOIN (
          SELECT player_id, MAX(id) AS latest_id
@@ -83,6 +85,8 @@ router.get("/rooms/:roomId/players-status", async (req, res) => {
          GROUP BY player_id
        ) latest ON latest.latest_id = tp.id
        JOIN cricketers c ON c.id = tp.player_id
+       JOIN users u ON u.id = tp.user_id
+       LEFT JOIN room_players rp ON rp.room_id = tp.room_id AND rp.user_id = tp.user_id
        WHERE tp.room_id = ?
        ORDER BY c.role, c.name`,
       [room.id, room.id]
@@ -94,7 +98,19 @@ router.get("/rooms/:roomId/players-status", async (req, res) => {
        LEFT JOIN (
          SELECT DISTINCT player_id FROM team_players WHERE room_id = ?
        ) sold ON sold.player_id = c.id
-       WHERE sold.player_id IS NULL
+       LEFT JOIN (
+         SELECT DISTINCT player_id FROM unsold_players WHERE room_id = ?
+       ) unsold_tbl ON unsold_tbl.player_id = c.id
+       WHERE sold.player_id IS NULL AND unsold_tbl.player_id IS NULL
+       ORDER BY c.role, c.name`,
+      [room.id, room.id]
+    );
+
+    const [unsold] = await pool.query(
+      `SELECT c.id, c.name, c.role, c.batting_rating, c.bowling_rating, c.rating, c.base_price, c.country
+       FROM unsold_players up
+       JOIN cricketers c ON c.id = up.player_id
+       WHERE up.room_id = ?
        ORDER BY c.role, c.name`,
       [room.id]
     );
@@ -134,7 +150,8 @@ router.get("/rooms/:roomId/players-status", async (req, res) => {
       roomDbId: room.id,
       sold,
       remaining,
-      counts: { sold: sold.length, remaining: remaining.length },
+      unsold,
+      counts: { sold: sold.length, remaining: remaining.length, unsold: unsold.length },
       userTeam,
       userBudget,
     });

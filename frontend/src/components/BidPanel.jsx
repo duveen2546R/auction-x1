@@ -2,27 +2,43 @@ import { useState } from "react";
 
 export default function BidPanel({ currentBid, step, budget, onBid, onWithdraw, onPass, isPassed = false, isEliminated = false }) {
     const suggested = Number(currentBid) + Number(step);
+    const cannotAfford = suggested > (budget || 0);
 
     const placeBid = () => {
         onBid(suggested);
     };
 
     return (
-        <div className="flex flex-wrap items-center gap-3">
-            <button
-                className="primary-btn px-6 py-3"
-                onClick={placeBid}
-                disabled={isPassed || isEliminated || suggested > (budget || 0)}
-            >
-                Bid ₹{suggested.toFixed(2)} Cr (step {step} Cr)
-            </button>
-            <button className="ghost-btn" onClick={onWithdraw} disabled={isEliminated}>
-                Withdraw
-            </button>
-            <button className="ghost-btn" onClick={onPass} disabled={isPassed || isEliminated}>
-                Pass
-            </button>
-            <span className="text-sm text-slate-400">Balance: ₹{budget?.toFixed(2)} Cr</span>
+        <div className="flex flex-col gap-6 p-4">
+            <div className="flex flex-wrap items-center gap-4">
+                <button
+                    className={`primary-btn px-10 py-5 text-xl flex flex-col items-center justify-center min-w-[240px]
+                               ${(isPassed || isEliminated || cannotAfford) ? "opacity-30 cursor-not-allowed saturate-0" : ""}`}
+                    onClick={placeBid}
+                    disabled={isPassed || isEliminated || cannotAfford}
+                >
+                    <span className="text-sm font-bold uppercase tracking-widest opacity-70 mb-1">Place Bid</span>
+                    <span className="text-2xl font-black italic tracking-tighter">₹{suggested.toFixed(2)} Cr</span>
+                </button>
+                
+                <div className="flex gap-3">
+                    <button className="ghost-btn px-6 py-4" onClick={onWithdraw} disabled={isEliminated}>
+                        Withdraw
+                    </button>
+                    <button className="ghost-btn px-6 py-4" onClick={onPass} disabled={isPassed || isEliminated}>
+                        Pass
+                    </button>
+                </div>
+            </div>
+
+            <div className="flex items-center gap-2 bg-white/5 border border-white/5 rounded-2xl p-4 w-fit">
+                <div className="flex flex-col">
+                    <span className="text-[10px] text-slate-400 font-bold uppercase tracking-widest leading-none mb-2">Available Balance</span>
+                    <span className={`text-2xl font-black italic ${cannotAfford ? "text-rose-500" : "text-accent"}`}>
+                        ₹{budget?.toFixed(2)} <span className="text-sm">Cr</span>
+                    </span>
+                </div>
+            </div>
         </div>
     );
 }

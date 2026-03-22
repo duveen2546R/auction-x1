@@ -170,18 +170,32 @@ async function ensureRoomPlayerRow(roomDbId, userId, teamName, teamId) {
   );
 
   if (!existingRows.length) {
+    let initialBudget = 100;
+    if (teamId) {
+      try {
+        const [teams] = await pool.query("SELECT budget FROM teams WHERE id = ?", [teamId]);
+        if (teams.length) {
+          initialBudget = Number(teams[0].budget);
+          console.log(`Setting initial budget for user ${userId} in room ${roomDbId} from team ${teamId}: ${initialBudget}`);
+        }
+      } catch (err) {
+        console.warn("Failed to fetch team budget", err.message);
+      }
+    }
+
     await pool.query(
-      "INSERT INTO room_players (room_id, user_id, team_name, team_id) VALUES (?, ?, ?, ?)",
-      [roomDbId, userId, teamName, teamId]
+      "INSERT INTO room_players (room_id, user_id, budget, team_name, team_id) VALUES (?, ?, ?, ?, ?)",
+      [roomDbId, userId, initialBudget, teamName, teamId]
     );
 
     return {
-      budget: 100,
+      budget: initialBudget,
       teamName: teamName || null,
     };
   }
 
   const [latestRow, ...duplicateRows] = existingRows;
+  console.log(`Found existing room_player row for user ${userId} in room ${roomDbId}. Current budget: ${latestRow.budget}`);
   const nextTeamName = teamName || latestRow.team_name || null;
   const nextTeamId = teamId ?? latestRow.team_id ?? null;
 
@@ -308,24 +322,8 @@ function maybeAutoResolve(roomId) {
     endAuction(roomId);
     return;
   }
-  if (active.length === 1) {
-    if (!room.highestBidder) {
-      room.highestBidder = active[0];
-      room.currentBid = Number(room.currentPlayer.base_price) || 0;
-      room.highestBidderUserId = room.users.get(active[0])?.userId || null;
-      room.highestBidderName = room.users.get(active[0])?.username || null;
-      const by = getHighestBidderName(room);
-      room.bidHistory.push({ amount: room.currentBid, by, ts: Date.now(), note: "auto-win (only bidder)" });
-      io.to(roomId).emit("bid_update", {
-        amount: room.currentBid,
-        by,
-        history: room.bidHistory.slice(-10),
-      });
-    }
-    finalizeBid(roomId);
-  } else if (active.length === 0) {
-    finalizeBid(roomId);
-  }
+  // Remove the active.length === 1 auto-resolution to prevent 
+  // "clicking for purchasing all other players" automatically.
 }
 
 function emitQueueUpdate(roomId) {
@@ -356,9 +354,9 @@ function evaluatePlaying11(room, socketId, playerIds) {
     if (isOverseas) overseas += 1;
 
     const isAr = role.includes("all");
-    const isBat = role.includes("bat");
-    const isBowl = role.includes("bowl");
-    const isWk = role.includes("keep");
+    const isBat = role.includes("bat") || role.includes("open") || role.includes("middle");
+    const isBowl = role.includes("bowl") || role.includes("pace") || role.includes("spin");
+    const isWk = role.includes("keep") || role.includes("wk");
 
     if (isAr) {
       ars += 1;
@@ -369,14 +367,14 @@ function evaluatePlaying11(room, socketId, playerIds) {
     } else {
       if (isBat) { bats += 1; battingTotal += batR; }
       if (isBowl) { bowls += 1; bowlingTotal += bowlR; }
-      if (isWk) { wks += 1; battingTotal += batR; }
+      if (isWk) { wks += 1; bats += 1; battingTotal += batR; }
     }
   });
 
   if (bats < 3) return { ok: false, reason: "Need at least 3 batsmen" };
-  if (bowls < 3) return { ok: false, reason: "Need at least 3 bowlers" };
+  if (bowls < 2) return { ok: false, reason: "Need at least 2 bowlers" };
   if (wks < 1) return { ok: false, reason: "Need at least 1 wicketkeeper" };
-  if (ars < 1 || ars > 3) return { ok: false, reason: "Need 1–3 all-rounders" };
+  if (ars > 4) return { ok: false, reason: "Max 4 all-rounders" };
   if (overseas > 4) return { ok: false, reason: "Max 4 overseas players" };
 
   const balanceBonus = 100;
@@ -445,7 +443,24 @@ async function finalizeBid(roomId) {
 
   try {
     if (winnerUserId || liveWinner) {
-      let nextBudget = Math.max(0, Number(liveWinner?.budget ?? 100) - soldPrice);
+      let currentBudget = Number(liveWinner?.budget ?? 100);
+      
+      // If we have a DB ID, always double check the budget from DB to be safe
+      if (room.dbId && winnerUserId) {
+        try {
+          const [budgetRows] = await pool.query(
+            "SELECT budget FROM room_players WHERE room_id = ? AND user_id = ? LIMIT 1",
+            [room.dbId, winnerUserId]
+          );
+          if (budgetRows.length) {
+            currentBudget = Number(budgetRows[0].budget);
+          }
+        } catch (err) {
+          console.warn("Failed to fetch latest budget from DB in finalizeBid", err.message);
+        }
+      }
+
+      let nextBudget = Math.max(0, currentBudget - soldPrice);
       let salePersisted = false;
       let saleAlreadyExists = false;
 
@@ -457,14 +472,6 @@ async function finalizeBid(roomId) {
         liveWinner.score = calculateScore(liveWinner.team);
       }
 
-      if (!liveWinner && room.dbId && winnerUserId) {
-          const [budgetRows] = await pool.query(
-            "SELECT budget FROM room_players WHERE room_id = ? AND user_id = ? LIMIT 1",
-            [room.dbId, winnerUserId]
-          );
-          nextBudget = Math.max(0, Number(budgetRows[0]?.budget ?? 100) - soldPrice);
-      }
-
       if (room.dbId && winnerUserId) {
         try {
           const [existingSales] = await pool.query(
@@ -474,12 +481,14 @@ async function finalizeBid(roomId) {
 
           if (existingSales.length) {
             saleAlreadyExists = true;
-            if (!liveWinner && existingSales[0].user_id === winnerUserId) {
-              const [budgetRows] = await pool.query(
-                "SELECT budget FROM room_players WHERE room_id = ? AND user_id = ? LIMIT 1",
-                [room.dbId, winnerUserId]
-              );
-              nextBudget = Number(budgetRows[0]?.budget ?? nextBudget);
+            // If it already exists, we should use the budget that was ALREADY set
+            // instead of subtracting again.
+            const [budgetRows] = await pool.query(
+              "SELECT budget FROM room_players WHERE room_id = ? AND user_id = ? LIMIT 1",
+              [room.dbId, winnerUserId]
+            );
+            if (budgetRows.length) {
+              nextBudget = Number(budgetRows[0].budget);
             }
           } else {
             await pool.query(
@@ -515,6 +524,17 @@ async function finalizeBid(roomId) {
         duplicatedSaleIgnored: saleAlreadyExists && !salePersisted,
       });
     } else {
+      // Record as unsold if it's a room with DB
+      if (room.dbId) {
+        try {
+          await pool.query(
+            "INSERT INTO unsold_players (room_id, player_id) VALUES (?, ?) ON CONFLICT DO NOTHING",
+            [room.dbId, soldPlayer.id]
+          );
+        } catch (err) {
+          console.error("Failed to record unsold player", err.message);
+        }
+      }
       io.to(roomId).emit("player_won", {
         player: soldPlayer,
         winner: null,
@@ -711,6 +731,7 @@ function handleBid(socket, amount) {
 
   const user = room.users.get(socket.id);
   if (user && numericBid > (user.budget ?? 100)) {
+    socket.emit("bid_error", { reason: "Insufficient budget" });
     return;
   }
 
@@ -917,18 +938,19 @@ io.on("connection", (socket) => {
     });
 
     if (room.highestBidder === socket.id) {
-      room.highestBidder = null;
-      room.highestBidderUserId = null;
-      room.highestBidderName = null;
-      room.currentBid = Number(room.currentPlayer.base_price) || 0;
-      room.lastBidAt = Date.now();
-      room.warnedOnce = false;
-      room.warnedTwice = false;
-      io.to(roomId).emit("bid_update", { amount: room.currentBid, by: null, history: room.bidHistory.slice(-10) });
+      // Do nothing to the bid. The user is just passing further bids, 
+      // but their current high bid should still stand.
+      // Alternatively, we could prevent them from passing, 
+      // but letting them pass means "I'm done with this player".
+      // We only notify others of the pass.
+      io.to(roomId).emit("bid_update", { amount: room.currentBid, by: room.highestBidderName, history: room.bidHistory.slice(-10) });
     }
 
     const totalPlayers = room.users.size;
-    if (totalPlayers > 0 && room.passedUsers.size >= totalPlayers) {
+    const activeIds = activeSockets(room);
+    const everyonePassed = room.passedUsers.size >= activeIds.length;
+
+    if (activeIds.length > 0 && everyonePassed) {
       if (room.timer) {
         clearInterval(room.timer);
         room.timer = null;

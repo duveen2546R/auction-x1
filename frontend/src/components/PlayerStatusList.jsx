@@ -9,8 +9,8 @@ const roleLabel = {
 
 const roleOrder = { batsman: 0, allrounder: 1, bowler: 2, wicketkeeper: 3 };
 
-export default function PlayerStatusList({ sold = [], remaining = [], currentId = null }) {
-  const [filter, setFilter] = useState("all"); // available | sold | all
+export default function PlayerStatusList({ sold = [], remaining = [], unsold = [], currentId = null }) {
+  const [filter, setFilter] = useState("all"); // available | sold | unsold | all
 
   const sections = useMemo(() => {
     const available = remaining
@@ -31,20 +31,34 @@ export default function PlayerStatusList({ sold = [], remaining = [], currentId 
         return (a.name || "").localeCompare(b.name || "");
       });
 
+    const unsoldList = unsold
+      .map((p) => ({ ...p, status: "Unsold" }))
+      .sort((a, b) => {
+        const ra = roleOrder[(a.role || "").toLowerCase()] ?? 99;
+        const rb = roleOrder[(b.role || "").toLowerCase()] ?? 99;
+        if (ra !== rb) return ra - rb;
+        return (a.name || "").localeCompare(b.name || "");
+      });
+
     if (filter === "available") return [{ title: "Available", items: available }];
     if (filter === "sold") return [{ title: "Sold", items: soldList }];
+    if (filter === "unsold") return [{ title: "Unsold", items: unsoldList }];
     return [
       { title: "Available", items: available },
       { title: "Sold", items: soldList },
+      { title: "Unsold", items: unsoldList },
     ];
-  }, [filter, remaining, sold]);
+  }, [filter, remaining, sold, unsold]);
 
   const badge = (status) =>
     status === "Sold"
       ? "bg-emerald-500/20 text-emerald-200 border border-emerald-500/60"
+      : status === "Unsold"
+      ? "bg-rose-500/20 text-rose-200 border border-rose-500/60"
       : "bg-sky-500/15 text-sky-100 border border-sky-500/40";
 
-  const rowBg = (status) => (status === "Sold" ? "bg-emerald-500/10" : "bg-slate-900/70");
+  const rowBg = (status) =>
+    status === "Sold" ? "bg-emerald-500/10" : status === "Unsold" ? "bg-rose-500/10" : "bg-slate-900/70";
 
   const btn = (key, label, count) => (
     <button
@@ -64,14 +78,15 @@ export default function PlayerStatusList({ sold = [], remaining = [], currentId 
     <div className="space-y-2 bg-[#0a0f1c]/90 border border-border rounded-xl p-3 backdrop-blur">
       <div className="flex items-center justify-between text-slate-100">
         <h4 className="text-sm uppercase tracking-wide">All Players</h4>
-        <span className="text-[11px] text-slate-300">Sold {sold.length} · Remaining {remaining.length}</span>
+        <span className="text-[11px] text-slate-300">Sold {sold.length} · Unsold {unsold.length} · Remaining {remaining.length}</span>
       </div>
 
-      <div className="flex gap-2 text-xs">{
+      <div className="flex gap-2 text-xs flex-wrap">{
         [
           ["available", "Available", remaining.length],
           ["sold", "Sold", sold.length],
-          ["all", "All", sold.length + remaining.length],
+          ["unsold", "Unsold", unsold.length],
+          ["all", "All", sold.length + unsold.length + remaining.length],
         ].map(([k, label, count]) => btn(k, label, count))
       }</div>
 
@@ -105,7 +120,7 @@ export default function PlayerStatusList({ sold = [], remaining = [], currentId 
                     </div>
                   </div>
                   <span className={`text-[11px] px-2 py-1 rounded-full whitespace-nowrap ${badge(p.status)}`}>
-                    {p.status}
+                    {p.status === "Sold" ? (p.soldTo || "Sold") : p.status}
                   </span>
                 </div>
               );

@@ -16,14 +16,14 @@ CREATE TABLE IF NOT EXISTS rooms (
 CREATE TABLE IF NOT EXISTS teams (
   id SERIAL PRIMARY KEY,
   name VARCHAR(100) UNIQUE,
-  budget INT DEFAULT 100
+  budget DECIMAL(10,2) DEFAULT 100.00
 );
 
 CREATE TABLE IF NOT EXISTS room_players (
   id SERIAL PRIMARY KEY,
   room_id INT REFERENCES rooms(id) ON DELETE CASCADE,
   user_id INT REFERENCES users(id) ON DELETE CASCADE,
-  budget INT DEFAULT 100,
+  budget DECIMAL(10,2) DEFAULT 100.00,
   team_name VARCHAR(50),
   team_id INT REFERENCES teams(id) ON DELETE SET NULL,
   UNIQUE (room_id, user_id)
@@ -55,6 +55,13 @@ CREATE TABLE IF NOT EXISTS team_players (
   user_id INT REFERENCES users(id) ON DELETE CASCADE,
   player_id INT REFERENCES cricketers(id) ON DELETE CASCADE,
   price DECIMAL(10,2)
+);
+
+CREATE TABLE IF NOT EXISTS unsold_players (
+  id SERIAL PRIMARY KEY,
+  room_id INT REFERENCES rooms(id) ON DELETE CASCADE,
+  player_id INT REFERENCES cricketers(id) ON DELETE CASCADE,
+  UNIQUE(room_id, player_id)
 );
 
 CREATE TABLE IF NOT EXISTS auction_state (
