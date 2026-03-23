@@ -453,8 +453,8 @@ function evaluatePlaying11(room, socketId, playerIds) {
   if (ars > 4) return { ok: false, reason: "Max 4 all-rounders" };
   if (overseas > 4) return { ok: false, reason: "Max 4 overseas players" };
 
-  const balanceBonus = 100;
-  const score = battingTotal * 0.45 + bowlingTotal * 0.45 + balanceBonus * 0.1;
+  const balanceBonus = Number(user.budget || 0);
+  const score = (battingTotal + bowlingTotal) * 0.4 + balanceBonus * 0.2;
 
   return {
     ok: true,
@@ -1212,7 +1212,7 @@ io.on("connection", (socket) => {
     }
 
     const team = persistedTeam.length ? persistedTeam : existingUser?.team || [];
-    const mergedBudget = budget ?? existingUser?.budget ?? 100;
+    const mergedBudget = budget ?? existingUser?.budget ?? 120;
     const mergedUser = {
       username: cleanName,
       team,

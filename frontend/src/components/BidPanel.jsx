@@ -12,7 +12,7 @@ export default function BidPanel({ currentBid, step, budget, onBid, onWithdraw, 
 
     return (
         <div className="flex flex-col gap-6 p-4">
-            <div className="flex flex-wrap items-center gap-4">
+            <div className="flex flex-wrap items-center gap-8">
                 <button
                     className={`primary-btn px-10 py-5 text-xl flex flex-col items-center justify-center min-w-[240px]
                                ${(isInteractionDisabled || cannotAfford) ? "opacity-30 cursor-not-allowed saturate-0" : ""}`}
@@ -23,11 +23,11 @@ export default function BidPanel({ currentBid, step, budget, onBid, onWithdraw, 
                     <span className="text-2xl font-black italic tracking-tighter tabular-nums">₹{suggested.toFixed(2)} Cr</span>
                 </button>
                 
-                <div className="flex gap-3">
-                    <button className="ghost-btn px-6 py-4" onClick={onWithdraw} disabled={isEliminated || isSpectator}>
+                <div className="flex items-center gap-4">
+                    <button className="ghost-btn px-6 py-4 min-w-[120px]" onClick={onWithdraw} disabled={isEliminated || isSpectator}>
                         Withdraw
                     </button>
-                    <button className="ghost-btn px-6 py-4" onClick={onPass} disabled={isPassed || isEliminated || isSpectator}>
+                    <button className="ghost-btn px-6 py-4 min-w-[100px]" onClick={onPass} disabled={isPassed || isEliminated || isSpectator}>
                         Pass
                     </button>
                 </div>

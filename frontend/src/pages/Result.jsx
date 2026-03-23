@@ -326,6 +326,7 @@ export default function Result() {
                                                         <div className="flex gap-2 mt-1">
                                                             <span className="text-[8px] text-slate-500 font-bold uppercase tracking-widest">B {r.breakdown.battingTotal}</span>
                                                             <span className="text-[8px] text-slate-500 font-bold uppercase tracking-widest">W {r.breakdown.bowlingTotal}</span>
+                                                            <span className="text-[8px] text-slate-500 font-bold uppercase tracking-widest">P {r.breakdown.balanceBonus}</span>
                                                         </div>
                                                     </div>
                                                     <div className="flex flex-col items-end">
