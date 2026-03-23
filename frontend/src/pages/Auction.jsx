@@ -63,6 +63,7 @@ export default function Auction() {
     const [setTransition, setSetTransition] = useState(null);
     const [withdrawOverlay, setWithdrawOverlay] = useState(false);
     const [passOverlay, setPassOverlay] = useState(false);
+    const [unsoldOverlay, setUnsoldOverlay] = useState(null);
 
     const apiBase = useMemo(() => import.meta.env.VITE_API_URL || "http://localhost:5000", []);
 
@@ -167,6 +168,11 @@ export default function Auction() {
                     price: Number(data.price || 0)
                 });
                 setTimeout(() => setSoldOverlay(null), 3000);
+            } else {
+                setUnsoldOverlay({
+                    playerName: data.player?.name || "Player"
+                });
+                setTimeout(() => setUnsoldOverlay(null), 2500);
             }
 
             setWarning(null);
@@ -511,6 +517,18 @@ export default function Auction() {
                     <div className="withdraw-content">
                         <div className="withdraw-text">WITHDRAWN</div>
                         <div className="withdraw-sub italic font-black">AUCTION TERMINATED FOR YOU</div>
+                    </div>
+                </div>
+            )}
+
+            {/* Cinematic UNSOLD Overlay */}
+            {unsoldOverlay && (
+                <div className="unsold-overlay">
+                    <div className="unsold-content">
+                        <div className="unsold-text">UNSOLD</div>
+                        <div className="unsold-sub italic font-black">
+                            {unsoldOverlay.playerName}
+                        </div>
                     </div>
                 </div>
             )}

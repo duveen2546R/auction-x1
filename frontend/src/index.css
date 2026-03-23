@@ -143,3 +143,29 @@
 .animate-pass-reveal {
   animation: pass-reveal 1.5s cubic-bezier(0.23, 1, 0.32, 1) forwards;
 }
+
+/* Unsold Overlay */
+.unsold-overlay {
+  @apply fixed inset-0 z-[140] flex items-center justify-center bg-slate-950/60 backdrop-blur-md pointer-events-none;
+}
+.unsold-content {
+  @apply flex flex-col items-center animate-unsold-reveal;
+}
+.unsold-text {
+  @apply text-[10vw] font-black italic tracking-tighter text-slate-400 uppercase leading-none select-none;
+  text-shadow: 0 0 40px rgba(148, 163, 184, 0.3);
+}
+.unsold-sub {
+  @apply mt-4 border-2 border-slate-500 text-slate-300 px-8 py-2 rounded-xl font-bold uppercase tracking-[0.3em] text-lg;
+}
+
+@keyframes unsold-reveal {
+  0% { transform: scale(0.9) translateY(20px); opacity: 0; }
+  15% { transform: scale(1) translateY(0); opacity: 1; }
+  85% { transform: scale(1) translateY(0); opacity: 1; }
+  100% { transform: scale(1.1) translateY(-20px); opacity: 0; filter: blur(10px); }
+}
+
+.animate-unsold-reveal {
+  animation: unsold-reveal 2.5s cubic-bezier(0.23, 1, 0.32, 1) forwards;
+}
