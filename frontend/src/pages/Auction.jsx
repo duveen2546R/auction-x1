@@ -53,6 +53,7 @@ export default function Auction() {
     const [sidebarOpen, setSidebarOpen] = useState(true);
     const [lastMyBid, setLastMyBid] = useState(null);
     const [eliminated, setEliminated] = useState(false);
+    const [isSpectator, setIsSpectator] = useState(false);
     const [bidHistory, setBidHistory] = useState([]);
     const [step, setStep] = useState(0.1);
     const [budget, setBudget] = useState(100);
@@ -66,7 +67,9 @@ export default function Auction() {
     const [withdrawOverlay, setWithdrawOverlay] = useState(false);
     const [passOverlay, setPassOverlay] = useState(false);
     const [unsoldOverlay, setUnsoldOverlay] = useState(null);
+    const [reconnectOverlay, setReconnectOverlay] = useState(false);
     const [timeLeft, setTimeLeft] = useState({ percent: 100, ms: 13000 });
+    const isInitialJoin = useRef(true);
 
     const apiBase = useMemo(() => import.meta.env.VITE_API_URL || "http://localhost:5000", []);
 
@@ -126,9 +129,15 @@ export default function Auction() {
     }, [apiBase, roomId, userId]);
 
     useEffect(() => {
-        if (roomId) {
-            socket.emit("join_room", { roomId, username, teamName });
-        }
+        const joinRoom = () => {
+            if (roomId) {
+                socket.emit("join_room", { roomId, username, teamName });
+            }
+        };
+
+        joinRoom();
+
+        socket.on("connect", joinRoom);
 
         socket.on("new_player", (player) => {
             if (!player) return;
@@ -242,11 +251,19 @@ export default function Auction() {
 
         socket.on("join_ack", (payload) => {
             if (!payload) return;
+            
+            if (!isInitialJoin.current) {
+                setReconnectOverlay(true);
+                setTimeout(() => setReconnectOverlay(false), 3000);
+            }
+            isInitialJoin.current = false;
+
             if (payload.userId) setUserId(payload.userId);
             if (Array.isArray(payload.team)) setTeam(payload.team);
             if (typeof payload.budget === "number") setBudget(Number(payload.budget));
             if (payload.queue) setQueueInfo(payload.queue);
             if (Array.isArray(payload.bidHistory)) setBidHistory(payload.bidHistory);
+            if (typeof payload.isSpectator === "boolean") setIsSpectator(payload.isSpectator);
             if (payload.currentPlayer) {
                 const player = payload.currentPlayer;
                 setCurrentPlayer(player);
@@ -265,19 +282,21 @@ export default function Auction() {
         }, 8000);
 
         return () => {
+            socket.off("connect", joinRoom);
             socket.off();
             clearInterval(poll);
         };
     }, [navigate, roomId, username, teamName, refreshPlayerStatus, refreshPurses, userId]);
 
     const placeBid = (amount) => {
-        if (eliminated) return;
+        if (eliminated || isSpectator) return;
         socket.emit("place_bid", amount);
         const rounded = Math.round(Number(amount) * 100) / 100;
         setLastMyBid(rounded);
     };
 
     const withdraw = () => {
+        if (isSpectator) return;
         const confirmed = window.confirm("Are you sure you want to withdraw from the auction? You will be disqualified and can only rejoin as a viewer.");
         if (!confirmed) return;
         
@@ -288,7 +307,7 @@ export default function Auction() {
     };
 
     const passPlayer = () => {
-        if (hasPassed) return;
+        if (hasPassed || isSpectator) return;
         setHasPassed(true);
         setPassOverlay(true);
         socket.emit("pass_player");
@@ -321,6 +340,15 @@ export default function Auction() {
             }
         >
             <div className="max-w-7xl mx-auto space-y-8">
+                {isSpectator && (
+                    <div className="bg-slate-500/10 border border-slate-500/20 p-4 rounded-2xl flex items-center justify-between animate-pulse">
+                        <div className="flex items-center gap-3">
+                            <div className="w-2 h-2 rounded-full bg-slate-500"></div>
+                            <span className="text-[10px] font-black uppercase tracking-[0.3em] text-slate-400 italic">Spectator Mode Active</span>
+                        </div>
+                        <span className="text-[9px] font-bold text-slate-500 uppercase tracking-widest uppercase">You joined after the auction started</span>
+                    </div>
+                )}
                 {/* Header Section */}
                 <header className="flex flex-col md:flex-row items-center justify-between gap-6 pb-8 border-b border-white/5">
                     <div className="flex items-center gap-6">
@@ -567,6 +595,18 @@ export default function Auction() {
                     </div>
                 </div>
             )}
+
+            {/* Reconnected Notification */}
+            {reconnectOverlay && (
+                <div className="fixed inset-0 z-[100] flex items-center justify-center pointer-events-none">
+                    <div className="bg-emerald-500/10 border-2 border-emerald-500/30 backdrop-blur-xl px-12 py-6 rounded-3xl animate-slide-up flex flex-col items-center gap-2 shadow-2xl shadow-emerald-500/20">
+                        <div className="w-3 h-3 rounded-full bg-emerald-500 animate-pulse"></div>
+                        <div className="text-2xl font-black text-emerald-500 italic uppercase tracking-[0.2em]">System Reconnected</div>
+                        <div className="text-[10px] font-bold text-emerald-500/60 uppercase tracking-widest italic">Synchronizing Auction State...</div>
+                    </div>
+                </div>
+            )}
+
             <VoiceChat roomId={roomId} username={username} />
         </div>
     );

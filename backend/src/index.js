@@ -103,6 +103,7 @@ function createRoom(roomId) {
     playing11: new Map(),
     disqualified: new Set(),
     finalizingBid: false,
+    disconnectTimeouts: new Map(), // socketId -> timeout
   };
 }
 
@@ -957,6 +958,12 @@ io.on("connection", (socket) => {
     socket.data.userId = userId;
     const [existingSocketId, existingUser] = findRoomUser(room, userId, cleanName);
     if (existingSocketId) {
+      // Clear any pending disconnect timeout for this user
+      if (room.disconnectTimeouts.has(existingSocketId)) {
+        clearTimeout(room.disconnectTimeouts.get(existingSocketId));
+        room.disconnectTimeouts.delete(existingSocketId);
+        console.log(`Cleared disconnect timeout for ${cleanName} on reconnection`);
+      }
       migrateSocketIdentity(room, existingSocketId, socket.id);
     }
 
@@ -981,6 +988,17 @@ io.on("connection", (socket) => {
       teamName: cleanTeam || existingUser?.teamName || null,
     };
     room.users.set(socket.id, mergedUser);
+
+    // If this is a completely new user (not re-joining) and the auction already started, 
+    // mark them as a spectator (blocked from bidding).
+    const isNewUser = !existingUser;
+    const isSpectator = isNewUser && room.status !== "waiting";
+    
+    if (isSpectator) {
+      room.blockedUsers.add(socket.id);
+      console.log(`User ${cleanName} joined room ${roomId} as a spectator`);
+    }
+
     if (room.highestBidderUserId && userId && room.highestBidderUserId === userId) {
       room.highestBidder = socket.id;
       room.highestBidderName = cleanName;
@@ -999,6 +1017,7 @@ io.on("connection", (socket) => {
       bidHistory: room.bidHistory || [],
       queue: getQueueState(room),
       roomStatus: room.status,
+      isSpectator,
     });
     if (room.currentPlayer) {
       socket.emit("new_player", room.currentPlayer);
@@ -1156,8 +1175,19 @@ io.on("connection", (socket) => {
     if (!roomId) return;
     const room = rooms.get(roomId);
     if (!room) return;
-    room.users.delete(socket.id);
-    broadcastPlayers(roomId);
+
+    // Start a 60-second grace period before removing the user
+    const timeoutId = setTimeout(() => {
+      if (room.users.has(socket.id)) {
+        room.users.delete(socket.id);
+        room.disconnectTimeouts.delete(socket.id);
+        broadcastPlayers(roomId);
+        console.log(`User ${socket.data.username} removed from room ${roomId} after grace period`);
+      }
+    }, 60000); // 60 seconds
+
+    room.disconnectTimeouts.set(socket.id, timeoutId);
+    
     io.to(roomId).emit("user_left_voice", { socketId: socket.id });
   });
 });

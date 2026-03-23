@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo } from "react";
+import { useEffect, useState, useMemo, useRef } from "react";
 import { useParams, useLocation, useNavigate } from "react-router-dom";
 import socket from "../socket";
 import VoiceChat from "../components/VoiceChat";
@@ -8,6 +8,8 @@ export default function Lobby() {
     const { state } = useLocation();
     const navigate = useNavigate();
     const [players, setPlayers] = useState([]);
+    const [isReconnected, setIsReconnected] = useState(false);
+    const isInitialJoin = useRef(true);
 
     const username = state?.username || localStorage.getItem("username") || "Player";
     const teamName = state?.teamName || localStorage.getItem("teamName") || "";
@@ -35,7 +37,25 @@ export default function Lobby() {
     }, [teamName]);
 
     useEffect(() => {
-        socket.emit("join_room", { roomId, username, teamName });
+        const joinRoom = () => {
+            socket.emit("join_room", { roomId, username, teamName });
+        };
+
+        joinRoom();
+
+        socket.on("connect", joinRoom);
+
+        socket.on("join_ack", (payload) => {
+            if (!isInitialJoin.current) {
+                setIsReconnected(true);
+                setTimeout(() => setIsReconnected(false), 3000);
+            }
+            isInitialJoin.current = false;
+
+            if (payload.roomStatus && payload.roomStatus !== "waiting") {
+                navigate(`/auction/${roomId}`, { state: { username, teamName } });
+            }
+        });
 
         socket.on("players_update", (playerList) => {
             setPlayers(playerList);
@@ -49,7 +69,13 @@ export default function Lobby() {
             setError(`Team ${payload.team} already taken. Choose another team.`);
         });
 
-        return () => socket.off();
+        return () => {
+            socket.off("connect", joinRoom);
+            socket.off("join_ack");
+            socket.off("players_update");
+            socket.off("start_auction");
+            socket.off("team_taken");
+        };
     }, [navigate, roomId, username, teamName]);
 
     return (
@@ -86,6 +112,12 @@ export default function Lobby() {
                 </header>
 
                 <main className="space-y-6">
+                    {isReconnected && (
+                        <div className="p-4 bg-emerald-500/10 border border-emerald-500/20 rounded-xl flex items-center justify-center gap-3 animate-slide-up">
+                            <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></div>
+                            <p className="text-[10px] font-black text-emerald-500 uppercase tracking-[0.2em] italic">Connection Restored</p>
+                        </div>
+                    )}
                     {error && (
                         <div className="p-4 bg-rose-500/10 border border-rose-500/20 rounded-xl text-center">
                             <p className="text-xs font-bold text-rose-500 uppercase tracking-widest italic">{error}</p>
