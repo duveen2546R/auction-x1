@@ -47,12 +47,15 @@ export default function Result() {
     const team = state?.team || [];
     const isDisqualified = state?.disqualified;
     const deadline = state?.deadline || null;
+    const initialStartTime = state?.selectionStartTime || null;
+    const [selectionStartTime, setSelectionStartTime] = useState(initialStartTime);
     const [selected, setSelected] = useState([]);
     const [submitting, setSubmitting] = useState(false);
     const [error, setError] = useState(null);
     const [results, setResults] = useState(null);
     const [winner, setWinner] = useState(null);
     const [remaining, setRemaining] = useState(null);
+    const [waitRemaining, setWaitRemaining] = useState(null);
 
     const teamName = localStorage.getItem("teamName") || "";
     const username = localStorage.getItem("username") || "Player";
@@ -88,13 +91,21 @@ export default function Result() {
             setError(payload.reason);
             setSubmitting(false);
         };
+        const onAuctionComplete = (payload) => {
+            if (payload.selectionStartTime) {
+                setSelectionStartTime(payload.selectionStartTime);
+            }
+        };
+
         socket.on("playing11_results", onResults);
         socket.on("playing11_error", onErr);
         socket.on("playing11_ack", () => setSubmitting(true));
+        socket.on("auction_complete", onAuctionComplete);
         return () => {
             socket.off("playing11_results", onResults);
             socket.off("playing11_error", onErr);
             socket.off("playing11_ack");
+            socket.off("auction_complete", onAuctionComplete);
         };
     }, []);
 
@@ -109,6 +120,19 @@ export default function Result() {
         return () => clearInterval(interval);
     }, [deadline]);
 
+    useEffect(() => {
+        if (!selectionStartTime) return;
+        const waitPeriod = 3 * 60 * 1000;
+        const tick = () => {
+            const elapsed = Date.now() - selectionStartTime;
+            const ms = waitPeriod - elapsed;
+            setWaitRemaining(ms > 0 ? Math.ceil(ms / 1000) : 0);
+        };
+        tick();
+        const interval = setInterval(tick, 1000);
+        return () => clearInterval(interval);
+    }, [selectionStartTime]);
+
     const validation = useMemo(() => validateLineup(team, selected), [team, selected]);
 
     const toggle = (id) => {
@@ -122,7 +146,7 @@ export default function Result() {
     };
 
     const submit = () => {
-        if (isDisqualified) return;
+        if (isDisqualified || waitRemaining > 0) return;
         setError(null);
         const v = validateLineup(team, selected);
         if (!v.ok) {
@@ -263,13 +287,15 @@ export default function Result() {
                                 <button 
                                     className="primary-btn w-full !py-4 !rounded-xl text-sm font-black tracking-[0.2em] uppercase italic disabled:opacity-30 disabled:cursor-not-allowed" 
                                     onClick={submit} 
-                                    disabled={!validation.ok || submitting || isDisqualified}
+                                    disabled={!validation.ok || submitting || isDisqualified || waitRemaining > 0}
                                 >
                                     {submitting ? (
                                         <span className="flex items-center justify-center gap-2">
                                             <span className="w-2 h-2 rounded-full bg-white animate-pulse"></span>
                                             AWAITING ALL TEAMS...
                                         </span>
+                                    ) : waitRemaining > 0 ? (
+                                        `STRATEGIZE (${waitRemaining}s)`
                                     ) : (
                                         "LOCK IN PLAYING XI"
                                     )}

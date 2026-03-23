@@ -141,7 +141,7 @@ router.get("/rooms/:roomId/players-status", async (req, res) => {
         [room.id, resolvedUserId]
       );
       if (budgetRows.length) {
-        userBudget = Number(budgetRows[0].budget ?? 100);
+        userBudget = Number(budgetRows[0].budget ?? 120);
       }
     }
 

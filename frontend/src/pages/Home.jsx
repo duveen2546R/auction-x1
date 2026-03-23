@@ -192,7 +192,7 @@ export default function Home() {
                                             Financial & Bidding Tiers
                                         </h4>
                                         <ul className="space-y-2 text-xs text-slate-300 font-medium leading-relaxed bg-white/5 p-4 rounded-xl border border-white/5">
-                                            <li className="flex items-start gap-2"><span className="text-accent">•</span> Franchise starting purse is strict at ₹100.00 Cr.</li>
+                                            <li className="flex items-start gap-2"><span className="text-accent">•</span> Franchise starting purse is strict at ₹120.00 Cr.</li>
                                             <li className="flex items-start gap-2"><span className="text-accent">•</span> Base Price to ₹10 Cr: Increment is ₹0.20 Cr.</li>
                                             <li className="flex items-start gap-2"><span className="text-accent">•</span> Above ₹10 Cr: Increment is ₹0.50 Cr.</li>
                                             <li className="flex items-start gap-2"><span className="text-accent">•</span> No consecutive self-bidding allowed.</li>
@@ -251,7 +251,7 @@ export default function Home() {
                                 {[
                                     { step: "1", title: "Form a Lobby", desc: "Create a room and share the 6-digit code with friends." },
                                     { step: "2", title: "Draft Strategy", desc: "Review the player pool. Minimum 2 franchises required to start." },
-                                    { step: "3", title: "Bidding War", desc: "Outbid rivals in real-time. Manage your ₹100Cr purse carefully." },
+                                    { step: "3", title: "Bidding War", desc: "Outbid rivals in real-time. Manage your ₹120Cr purse carefully." },
                                     { step: "4", title: "Final Selection", desc: "Submit your best mathematically valid Playing XI within 2 minutes." },
                                     { step: "5", title: "Crowning", desc: "The algorithm calculates ratings. The highest score wins." }
                                 ].map((item, i) => (

@@ -100,6 +100,7 @@ function createRoom(roomId) {
     totalDuration: 13000,
     bidHistory: [],
     passedUsers: new Set(),
+    skipPoolUsers: new Set(),
     blockedUsers: new Set(),
     withdrawnUsers: new Set(),
     playing11: new Map(),
@@ -110,7 +111,10 @@ function createRoom(roomId) {
 }
 
 function activeSockets(room) {
-  return Array.from(room.users.keys()).filter((id) => !room.blockedUsers.has(id));
+  const connectedSockets = io.sockets.adapter.rooms.get(room.roomId);
+  return Array.from(room.users.keys()).filter((id) => 
+    !room.blockedUsers.has(id) && connectedSockets?.has(id)
+  );
 }
 
 function getRoom(roomId, dbId = null) {
@@ -131,8 +135,10 @@ function calculateScore(team = []) {
 function getQueueState(room) {
   return {
     remaining: room.playersQueue.length - room.idx,
-    completed: Math.max(0, room.idx - 1),
-    next: room.playersQueue.slice(room.idx, room.idx + 3),
+    completed: Math.max(0, room.idx - (room.currentPlayer ? 1 : 0)),
+    total: room.playersQueue.length,
+    currentIndex: room.idx,
+    currentSetName: room.currentPlayer?.setName || null,
   };
 }
 
@@ -355,13 +361,13 @@ function startTimer(roomId) {
     io.to(roomId).emit("timer_tick", { 
       remainingMs, 
       totalMs: totalDuration,
-      percent: (remainingMs / totalDuration) * 120 
+      percent: (remainingMs / totalDuration) * 100 
     });
 
-    if (!room.warnedOnce && remainingMs <= 6000) {
+    if (!room.warnedOnce && remainingMs <= 5000) {
       room.warnedOnce = true;
       io.to(roomId).emit("bid_warning", { stage: "once", by: getHighestBidderName(room) || "No bids" });
-    } else if (room.warnedOnce && !room.warnedTwice && remainingMs <= 3000) {
+    } else if (room.warnedOnce && !room.warnedTwice && remainingMs <= 2000) {
       room.warnedTwice = true;
       io.to(roomId).emit("bid_warning", { stage: "twice", by: getHighestBidderName(room) || "No bids" });
     } else if (idleMs >= totalDuration) {
@@ -370,7 +376,7 @@ function startTimer(roomId) {
       await finalizeBid(roomId);
       return;
     }
-  }, 1200);
+  }, 1000);
 }
 
 function maybeAutoResolve(roomId) {
@@ -382,10 +388,10 @@ function maybeAutoResolve(roomId) {
     return;
   }
 
-  // If every active player has either passed or is currently the high bidder,
+  // If every active player has either passed, is currently the high bidder, or voted to skip,
   // no more bidding is possible. Finalize immediately.
   const noMoreBidsPossible = activeIds.every(id => 
-    id === room.highestBidder || room.passedUsers.has(id)
+    id === room.highestBidder || room.passedUsers.has(id) || room.skipPoolUsers.has(id)
   );
 
   if (noMoreBidsPossible) {
@@ -447,7 +453,7 @@ function evaluatePlaying11(room, socketId, playerIds) {
   if (ars > 4) return { ok: false, reason: "Max 4 all-rounders" };
   if (overseas > 4) return { ok: false, reason: "Max 4 overseas players" };
 
-  const balanceBonus = 120;
+  const balanceBonus = 100;
   const score = battingTotal * 0.45 + bowlingTotal * 0.45 + balanceBonus * 0.1;
 
   return {
@@ -455,6 +461,40 @@ function evaluatePlaying11(room, socketId, playerIds) {
     score,
     breakdown: { battingTotal, bowlingTotal, balanceBonus, bats, bowls, wks, ars },
   };
+}
+
+async function persistAuctionState(roomId) {
+  const room = rooms.get(roomId);
+  if (!room || !room.dbId) return;
+
+  const state = {
+    idx: room.idx,
+    status: room.status,
+    currentBid: room.currentBid,
+    highestBidderUserId: room.highestBidderUserId,
+    highestBidderName: room.highestBidderName,
+    lastBidAt: room.lastBidAt,
+    totalDuration: room.totalDuration,
+    selectionStartTime: room.selectionStartTime,
+    selectDeadline: room.selectDeadline,
+  };
+
+  try {
+    const serialized = JSON.stringify(state);
+    const [updateResult] = await pool.query(
+      "UPDATE auction_state SET state = ?::jsonb WHERE room_id = ?",
+      [serialized, room.dbId]
+    );
+
+    if (updateResult.rowCount === 0) {
+      await pool.query(
+        "INSERT INTO auction_state (room_id, state) VALUES (?, ?::jsonb)",
+        [room.dbId, serialized]
+      );
+    }
+  } catch (err) {
+    console.error(`Failed to persist auction state for room ${roomId}`, err.message);
+  }
 }
 
 async function startNextPlayer(roomId) {
@@ -465,6 +505,10 @@ async function startNextPlayer(roomId) {
     clearInterval(room.timer);
     room.timer = null;
   }
+  
+  // Set status to pending while finding next player
+  room.status = "transitioning";
+  await persistAuctionState(roomId);
 
   // Find the next player in the queue who hasn't been sold or marked unsold
   let nextPlayer = null;
@@ -508,7 +552,7 @@ async function startNextPlayer(roomId) {
   if (isNewSet) {
     io.to(roomId).emit("set_transition", { setName: player.setName });
     // Wait for the transition animation to play before showing the player
-    setTimeout(() => {
+    setTimeout(async () => {
       room.currentPlayer = player;
       room.currentBid = Number(player.base_price || 0);
       room.highestBidder = null;
@@ -529,9 +573,19 @@ async function startNextPlayer(roomId) {
 
       io.to(roomId).emit("new_player", player);
       io.to(roomId).emit("bid_update", { amount: room.currentBid, by: null, history: room.bidHistory || [] });
+      
+      // Reset skip votes only on a NEW set
+      room.skipPoolUsers = new Set();
+      io.to(roomId).emit("skip_update", { 
+        count: 0, 
+        total: activeSockets(room).length,
+        setName: player.setName
+      });
+
       emitQueueUpdate(roomId);
       startTimer(roomId);
       maybeAutoResolve(roomId);
+      await persistAuctionState(roomId);
     }, 4000); // 4 second delay for the set transition animation
     return;
   }
@@ -557,9 +611,74 @@ async function startNextPlayer(roomId) {
 
   io.to(roomId).emit("new_player", player);
   io.to(roomId).emit("bid_update", { amount: room.currentBid, by: null, history: room.bidHistory || [] });
+  
+  // Do NOT reset skipPoolUsers here if it's the same set
+  io.to(roomId).emit("skip_update", { 
+    count: room.skipPoolUsers.size, 
+    total: activeSockets(room).length,
+    setName: player.setName
+  });
+
   emitQueueUpdate(roomId);
   startTimer(roomId);
   maybeAutoResolve(roomId);
+  await persistAuctionState(roomId);
+}
+
+async function skipPool(roomId) {
+  const room = rooms.get(roomId);
+  if (!room || !room.currentPlayer) return;
+
+  const currentSetName = room.currentPlayer.setName;
+  console.log(`Skipping pool: ${currentSetName} in room ${roomId}`);
+
+  // Mark current player as unsold
+  if (room.dbId) {
+    try {
+      await pool.query(
+        "INSERT INTO unsold_players (room_id, player_id) VALUES (?, ?) ON CONFLICT DO NOTHING",
+        [room.dbId, room.currentPlayer.id]
+      );
+    } catch (err) {
+      console.error("Failed to record unsold player on skip", err.message);
+    }
+  }
+
+  // Find the next pool (setName)
+  let nextPoolIdx = room.idx;
+  while (nextPoolIdx < room.playersQueue.length) {
+    if (room.playersQueue[nextPoolIdx].setName !== currentSetName) {
+      break;
+    }
+    // Record skipped players as unsold in DB
+    if (room.dbId) {
+      try {
+        await pool.query(
+          "INSERT INTO unsold_players (room_id, player_id) VALUES (?, ?) ON CONFLICT DO NOTHING",
+          [room.dbId, room.playersQueue[nextPoolIdx].id]
+        );
+      } catch (err) {
+        console.error("Failed to record skipped player as unsold", err.message);
+      }
+    }
+    nextPoolIdx++;
+  }
+
+  room.idx = nextPoolIdx;
+  room.skipPoolUsers = new Set();
+  
+  if (room.timer) {
+    clearInterval(room.timer);
+    room.timer = null;
+  }
+
+  io.to(roomId).emit("chat_message", {
+    user: "SYSTEM",
+    text: `All players voted to skip the "${currentSetName}" pool. Advancing to the next set...`,
+    ts: Date.now(),
+  });
+
+  startNextPlayer(roomId);
 }
 
 async function finalizeBid(roomId) {
@@ -567,6 +686,7 @@ async function finalizeBid(roomId) {
   if (!room || !room.currentPlayer || room.finalizingBid) return;
 
   room.finalizingBid = true;
+  room.status = "sold";
   const soldPlayer = { ...room.currentPlayer };
   const soldPrice = Number(room.currentBid || soldPlayer.base_price || 0);
 
@@ -688,7 +808,15 @@ async function finalizeBid(roomId) {
     }
   } finally {
     room.finalizingBid = false;
-    setTimeout(() => startNextPlayer(roomId), 1500);
+    
+    // Check if the pool skip was unanimous
+    const active = activeSockets(room);
+    if (active.length > 0 && room.skipPoolUsers.size >= active.length) {
+      io.to(roomId).emit("pool_skipped", { setName: room.currentPlayer?.setName });
+      setTimeout(() => skipPool(roomId), 1500);
+    } else {
+      setTimeout(() => startNextPlayer(roomId), 1500);
+    }
   }
 }
 
@@ -721,11 +849,26 @@ function endAuction(roomId) {
   userEntries.forEach(([sid, user]) => {
     const roster = user.team || [];
     const total = roster.length;
-    const bats = roster.filter((p) => p.role?.includes("bat")).length;
-    const bowls = roster.filter((p) => p.role?.includes("bowl")).length;
-    const wks = roster.filter((p) => p.role?.includes("keep")).length;
-    const ars = roster.filter((p) => p.role?.includes("all")).length;
-    const overseas = roster.filter((p) => (p.country || "").toLowerCase() !== "india").length;
+    
+    let bats = 0, bowls = 0, wks = 0, ars = 0, overseas = 0;
+    roster.forEach((p) => {
+      const role = (p.role || "").toLowerCase();
+      const isAr = role.includes("all");
+      const isBat = role.includes("bat") || role.includes("open") || role.includes("middle");
+      const isBowl = role.includes("bowl") || role.includes("pace") || role.includes("spin");
+      const isWk = role.includes("keep") || role.includes("wk");
+      const isOs = (p.country || "").toLowerCase() !== "india";
+      
+      if (isOs) overseas += 1;
+      if (isAr) {
+        ars += 1;
+      } else {
+        if (isBat) bats += 1;
+        if (isBowl) bowls += 1;
+        if (isWk) { wks += 1; bats += 1; }
+      }
+    });
+
     const locals = total - overseas;
 
     const feasible =
@@ -734,80 +877,101 @@ function endAuction(roomId) {
       bowls >= 2 &&
       wks >= 1 &&
       locals >= 7; // to satisfy max 4 overseas (total 11 - max 4 OS = min 7 locals)
-    // Note: ars is already limited by the 4-max rule during selection, 
-    // and here we check if pure roles meet the minimum requirements.
 
     if (!feasible) disqualified.add(sid);
   });
   room.disqualified = disqualified;
   const dqNames = Array.from(disqualified).map((sid) => room.users.get(sid)?.username).filter(Boolean);
 
-  room.selectDeadline = Date.now() + 2 * 60 * 1200; // 2 minutes
-  setTimeout(() => autoFinalizePlaying11(roomId), 2 * 60 * 1200 + 500);
+  room.selectionStartTime = Date.now();
+  room.selectDeadline = Date.now() + 5 * 60 * 1000; // 5 minutes total
+  setTimeout(() => autoFinalizePlaying11(roomId), 5 * 60 * 1000 + 500);
 
   io.to(roomId).emit("auction_complete", {
     stage: "select11",
     scores,
     disqualified: dqNames,
     deadline: room.selectDeadline,
+    selectionStartTime: room.selectionStartTime,
   });
 }
 
 function buildAutoLineup(team) {
   const lineup = [];
-  const bats = team.filter((p) => (p.role || "").toLowerCase().includes("bat") && !(p.role || "").toLowerCase().includes("all"));
-  const bowls = team.filter((p) => (p.role || "").toLowerCase().includes("bowl") && !(p.role || "").toLowerCase().includes("all"));
-  const wks = team.filter((p) => (p.role || "").toLowerCase().includes("keep"));
-  const ars = team.filter((p) => (p.role || "").toLowerCase().includes("all"));
-
+  
   const byScore = (arr) =>
     arr.slice().sort((a, b) => (Number(b.batting_rating ?? b.rating ?? 0) + Number(b.bowling_rating ?? b.rating ?? 0)) -
       (Number(a.batting_rating ?? a.rating ?? 0) + Number(a.bowling_rating ?? a.rating ?? 0)));
 
   const overseas = (p) => (p.country || "").toLowerCase() !== "india";
   const pushWithCap = (p) => {
+    if (lineup.find(x => x.id === p.id)) return false;
+    if (lineup.length >= 11) return false;
     const osCount = lineup.filter(overseas).length;
     if (overseas(p) && osCount >= 4) return false;
     lineup.push(p);
     return true;
   };
 
-  // 1 wk
-  for (const p of byScore(wks)) { if (pushWithCap(p)) break; }
-  if (!lineup.some((p) => (p.role || "").toLowerCase().includes("keep"))) return null;
+  const categorized = team.map(p => {
+    const role = (p.role || "").toLowerCase();
+    return {
+      p,
+      isAr: role.includes("all"),
+      isBat: role.includes("bat") || role.includes("open") || role.includes("middle"),
+      isBowl: role.includes("bowl") || role.includes("pace") || role.includes("spin"),
+      isWk: role.includes("keep") || role.includes("wk")
+    };
+  });
 
-  // 1-3 AR
-  for (const p of byScore(ars)) {
-    if (lineup.filter((x) => (x.role || "").toLowerCase().includes("all")).length >= 3) break;
-    pushWithCap(p);
-  }
-  if (lineup.filter((x) => (x.role || "").toLowerCase().includes("all")).length < 1) return null;
+  const wks = byScore(categorized.filter(c => c.isWk).map(c => c.p));
+  const ars = byScore(categorized.filter(c => c.isAr).map(c => c.p));
+  const bats = byScore(categorized.filter(c => c.isBat && !c.isAr && !c.isWk).map(c => c.p));
+  const bowls = byScore(categorized.filter(c => c.isBowl && !c.isAr).map(c => c.p));
 
-  // Fill bats to 4
-  for (const p of byScore(bats)) {
+  // 1. Must have 1 WK
+  for (const p of wks) { if (pushWithCap(p)) break; }
+  if (lineup.length < 1) return null; // No WK available
+
+  // 2. Add pure Batsmen to meet min 3 (WKs count as Batsmen)
+  for (const p of bats) {
     if (lineup.length >= 11) break;
-    const batCount = lineup.filter((x) => (x.role || "").toLowerCase().includes("bat") || (x.role || "").toLowerCase().includes("all")).length;
-    if (batCount >= 4) break;
+    const currentBats = lineup.filter(p => {
+      const r = (p.role || "").toLowerCase();
+      return (r.includes("bat") || r.includes("open") || r.includes("middle") || r.includes("keep") || r.includes("wk")) && !r.includes("all");
+    }).length;
+    if (currentBats >= 3) break;
     pushWithCap(p);
   }
 
-  // Fill bowls to 3
-  for (const p of byScore(bowls)) {
+  // 3. Add pure Bowlers to meet min 2
+  for (const p of bowls) {
     if (lineup.length >= 11) break;
-    const bowlCount = lineup.filter((x) => (x.role || "").toLowerCase().includes("bowl") || (x.role || "").toLowerCase().includes("all")).length;
-    if (bowlCount >= 3) break;
+    const currentBowls = lineup.filter(p => {
+      const r = (p.role || "").toLowerCase();
+      return (r.includes("bowl") || r.includes("pace") || r.includes("spin")) && !r.includes("all");
+    }).length;
+    if (currentBowls >= 2) break;
     pushWithCap(p);
   }
 
-  // Fill remaining best overall
-  const remaining = byScore(team.filter((p) => !lineup.includes(p)));
+  // 4. Add All-rounders (up to 4)
+  for (const p of ars) {
+    if (lineup.length >= 11) break;
+    const currentArs = lineup.filter(p => (p.role || "").toLowerCase().includes("all")).length;
+    if (currentArs >= 4) break;
+    pushWithCap(p);
+  }
+
+  // 5. Fill remaining with best available
+  const remaining = byScore(team.filter(p => !lineup.find(x => x.id === p.id)));
   for (const p of remaining) {
     if (lineup.length >= 11) break;
     pushWithCap(p);
   }
 
   if (lineup.length !== 11) return null;
-  const val = evaluatePlaying11({ users: new Map([["tmp", { team: lineup }]]) }, "tmp", lineup.map((p) => p.id));
+  const val = evaluatePlaying11({ users: new Map([["tmp", { team: team }]]) }, "tmp", lineup.map((p) => p.id));
   if (!val.ok) return null;
   return lineup;
 }
@@ -852,13 +1016,14 @@ async function autoFinalizePlaying11(roomId) {
 function handleBid(socket, amount) {
   const roomId = socket.data.roomId;
   const room = rooms.get(roomId);
-  if (!room || !room.currentPlayer) return;
+  if (!room || !room.currentPlayer || room.status !== "running" || room.finalizingBid) return;
   if (room.blockedUsers.has(socket.id)) return;
   if (room.passedUsers.has(socket.id)) return;
+  if (room.skipPoolUsers.has(socket.id)) return;
   if (room.highestBidder === socket.id) return; // prevent consecutive self-bids
 
-  const numericBid = Math.round(Number(amount) * 120) / 120;
-  const currentBidRounded = Math.round(room.currentBid * 120) / 120;
+  const numericBid = Math.round(Number(amount) * 100) / 100;
+  const currentBidRounded = Math.round(room.currentBid * 100) / 100;
   const step = currentBidRounded < 10 ? 0.2 : 0.5;
   
   // If no one has bid yet, allow bidding the base price (room.currentBid)
@@ -901,7 +1066,16 @@ function handleBid(socket, amount) {
     history: room.bidHistory.slice(-10),
     step: room.currentBid < 10 ? 0.2 : 0.5,
   });
+  
+  // Broadcast update to maintain 'total' sockets but keep the skip count
+  io.to(roomId).emit("skip_update", { 
+    count: room.skipPoolUsers.size, 
+    total: activeSockets(room).length,
+    setName: room.currentPlayer?.setName
+  });
+  
   maybeAutoResolve(roomId);
+  persistAuctionState(roomId);
 
   if (room.dbId && user?.userId && room.currentPlayer?.id) {
     pool
@@ -944,6 +1118,19 @@ io.on("connection", (socket) => {
       );
       roomDbId = insertRoom.insertId;
 
+      // Check if auction is ongoing and user is not already registered
+      const room = getRoom(roomId, roomDbId);
+      if (room.status !== "waiting") {
+        const [existingRp] = await pool.query(
+          "SELECT id FROM room_players WHERE room_id = ? AND user_id = ? LIMIT 1",
+          [roomDbId, userId]
+        );
+        if (existingRp.length === 0) {
+          socket.emit("join_error", { reason: "Auction has already started. New participants cannot join." });
+          return;
+        }
+      }
+
       if (cleanTeam) {
         const [teamRow] = await pool.query("SELECT id FROM teams WHERE name = ? LIMIT 1", [cleanTeam]);
         if (teamRow.length) {
@@ -974,6 +1161,34 @@ io.on("connection", (socket) => {
     }
 
     const room = getRoom(roomId, roomDbId);
+    
+    // Attempt state recovery if room is fresh
+    if (room.idx === 0 && room.status === "waiting") {
+      try {
+        const [stateRows] = await pool.query("SELECT state FROM auction_state WHERE room_id = ?", [roomDbId]);
+        if (stateRows.length) {
+          const recovered = stateRows[0].state;
+          console.log(`Recovering state for room ${roomId}:`, recovered);
+          room.idx = recovered.idx || 0;
+          room.status = recovered.status || "waiting";
+          room.currentBid = recovered.currentBid || 0;
+          room.highestBidderUserId = recovered.highestBidderUserId;
+          room.highestBidderName = recovered.highestBidderName;
+          room.lastBidAt = recovered.lastBidAt;
+          room.totalDuration = recovered.totalDuration || 13000;
+          room.selectionStartTime = recovered.selectionStartTime;
+          room.selectDeadline = recovered.selectDeadline;
+
+          // Re-fetch current player if needed
+          if (room.idx > 0 && !room.currentPlayer) {
+            room.currentPlayer = room.playersQueue[room.idx - 1];
+          }
+        }
+      } catch (err) {
+        console.error("State recovery failed", err.message);
+      }
+    }
+
     socket.data.userId = userId;
     const [existingSocketId, existingUser] = findRoomUser(room, userId, cleanName);
     if (existingSocketId) {
@@ -997,7 +1212,7 @@ io.on("connection", (socket) => {
     }
 
     const team = persistedTeam.length ? persistedTeam : existingUser?.team || [];
-    const mergedBudget = budget ?? existingUser?.budget ?? 120;
+    const mergedBudget = budget ?? existingUser?.budget ?? 100;
     const mergedUser = {
       username: cleanName,
       team,
@@ -1038,6 +1253,9 @@ io.on("connection", (socket) => {
       roomStatus: room.status,
       isSpectator,
       isWithdrawn: room.withdrawnUsers.has(socket.id),
+      disqualified: Array.from(room.disqualified).map((sid) => room.users.get(sid)?.username).filter(Boolean),
+      deadline: room.selectDeadline,
+      selectionStartTime: room.selectionStartTime,
     });
     if (room.currentPlayer) {
       socket.emit("new_player", room.currentPlayer);
@@ -1072,17 +1290,81 @@ io.on("connection", (socket) => {
     }
   });
 
-  socket.on("start_auction", (roomId) => {
+  socket.on("start_auction", async (roomId) => {
     const resolvedRoom = roomId || socket.data.roomId;
     if (!resolvedRoom) return;
     const room = getRoom(resolvedRoom);
     if (room.status === "running") return;
+    
+    // Clear previous room data if it has a DB ID
+    if (room.dbId) {
+      try {
+        await pool.query("DELETE FROM team_players WHERE room_id = ?", [room.dbId]);
+        await pool.query("DELETE FROM unsold_players WHERE room_id = ?", [room.dbId]);
+        await pool.query("DELETE FROM bids WHERE room_id = ?", [room.dbId]);
+        // Also reset budgets for room_players to default
+        const [teams] = await pool.query("SELECT id, budget FROM teams");
+        const budgetMap = new Map(teams.map(t => [t.id, t.budget]));
+        
+        const [rps] = await pool.query("SELECT id, team_id FROM room_players WHERE room_id = ?", [room.dbId]);
+        for (const rp of rps) {
+          const budget = rp.team_id ? budgetMap.get(rp.team_id) || 120 : 120;
+          await pool.query("UPDATE room_players SET budget = ? WHERE id = ?", [budget, rp.id]);
+        }
+        console.log(`Cleared previous session data for room ${resolvedRoom} (ID: ${room.dbId})`);
+      } catch (err) {
+        console.error("Failed to clear previous room data", err.message);
+      }
+    }
+    
+    // Reset room state for a fresh auction
+    room.idx = 0;
+    room.playersQueue = organizePlayersIntoSets(playersMaster);
+    room.passedUsers = new Set();
+    room.skipPoolUsers = new Set();
+    room.withdrawnUsers = new Set();
+    room.blockedUsers = new Set();
+    room.bidHistory = [];
+    room.currentPlayer = null;
+    room.currentBid = 0;
+    room.highestBidder = null;
+    room.highestBidderUserId = null;
+    room.highestBidderName = null;
+    room.finalizingBid = false;
+
     io.to(resolvedRoom).emit("start_auction");
     // Increased to 3 seconds to ensure all users have time to navigate and join
     setTimeout(() => startNextPlayer(resolvedRoom), 3000);
   });
 
   socket.on("place_bid", (amount) => handleBid(socket, amount));
+
+  socket.on("skip_pool", () => {
+    const roomId = socket.data.roomId;
+    const room = rooms.get(roomId);
+    if (!room || !room.currentPlayer || room.status !== "running") return;
+
+    room.skipPoolUsers.add(socket.id);
+    const active = activeSockets(room);
+    
+    io.to(roomId).emit("skip_update", { 
+      count: room.skipPoolUsers.size, 
+      total: active.length,
+      setName: room.currentPlayer?.setName
+    });
+
+    // Notify others that this user passed via skip vote
+    room.bidHistory.push({
+      amount: room.currentBid,
+      by: socket.data.username,
+      ts: Date.now(),
+      note: "skip vote (pass)",
+    });
+    io.to(roomId).emit("bid_update", { amount: room.currentBid, by: room.highestBidderName, history: room.bidHistory.slice(-10) });
+    
+    // Check if everyone has either passed or voted to skip
+    maybeAutoResolve(roomId);
+  });
 
   socket.on("withdraw_bid", async () => {
     const roomId = socket.data.roomId;
@@ -1163,6 +1445,18 @@ io.on("connection", (socket) => {
     const roomId = socket.data.roomId;
     const room = rooms.get(roomId);
     if (!room) return;
+    
+    // Check if 3 minutes (180,000 ms) have passed since selection started
+    const waitPeriod = 3 * 60 * 1000;
+    const elapsed = Date.now() - (room.selectionStartTime || 0);
+    if (elapsed < waitPeriod) {
+      const remainingWait = Math.ceil((waitPeriod - elapsed) / 1000);
+      socket.emit("playing11_error", { 
+        reason: `Please wait ${remainingWait}s more to finalize your squad. Use this time to strategize!` 
+      });
+      return;
+    }
+
     if (room.selectDeadline && Date.now() > room.selectDeadline) return;
     if (room.disqualified.has(socket.id)) {
       socket.emit("playing11_error", { reason: "Disqualified: insufficient squad to form valid XI" });
@@ -1199,7 +1493,7 @@ io.on("connection", (socket) => {
     const room = rooms.get(roomId);
     if (!room) return;
 
-    // Start a 60-second grace period before removing the user
+    // Start a 120-second grace period before removing the user
     const timeoutId = setTimeout(() => {
       if (room.users.has(socket.id)) {
         room.users.delete(socket.id);
@@ -1207,7 +1501,7 @@ io.on("connection", (socket) => {
         broadcastPlayers(roomId);
         console.log(`User ${socket.data.username} removed from room ${roomId} after grace period`);
       }
-    }, 60000); // 60 seconds
+    }, 120000); // 120 seconds
 
     room.disconnectTimeouts.set(socket.id, timeoutId);
     

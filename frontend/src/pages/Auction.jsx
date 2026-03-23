@@ -56,7 +56,7 @@ export default function Auction() {
     const [isSpectator, setIsSpectator] = useState(false);
     const [bidHistory, setBidHistory] = useState([]);
     const [step, setStep] = useState(0.1);
-    const [budget, setBudget] = useState(100);
+    const [budget, setBudget] = useState(120);
     const [chat, setChat] = useState([]);
     const [chatInput, setChatInput] = useState("");
     const [queueInfo, setQueueInfo] = useState({ remaining: null, completed: null, next: [] });
@@ -69,6 +69,10 @@ export default function Auction() {
     const [unsoldOverlay, setUnsoldOverlay] = useState(null);
     const [reconnectOverlay, setReconnectOverlay] = useState(false);
     const [timeLeft, setTimeLeft] = useState({ percent: 100, ms: 13000 });
+    const [skipInfo, setSkipInfo] = useState({ count: 0, total: 0 });
+    const [hasVotedSkip, setHasVotedSkip] = useState(false);
+    const [currentSet, setCurrentSet] = useState(null);
+    const [poolSkippedOverlay, setPoolSkippedOverlay] = useState(null);
     const isInitialJoin = useRef(true);
     const countdownAudio = useRef(new Audio("/countdown.mp3"));
 
@@ -268,6 +272,32 @@ export default function Auction() {
             if (q) setQueueInfo(q);
         });
 
+        socket.on("join_error", (payload) => {
+            alert(payload.reason);
+            navigate("/");
+        });
+
+        socket.on("skip_update", (data) => {
+            if (data) {
+                setSkipInfo(data);
+                if (data.setName && data.setName !== currentSet) {
+                    setCurrentSet(data.setName);
+                    setHasVotedSkip(false);
+                }
+            }
+        });
+
+        socket.on("pool_skipped", (payload) => {
+            if (payload?.setName) {
+                // If we just sold/unsold someone, wait for that overlay to finish mostly
+                const delay = (soldOverlay || unsoldOverlay) ? 2000 : 0;
+                setTimeout(() => {
+                    setPoolSkippedOverlay(payload.setName);
+                    setTimeout(() => setPoolSkippedOverlay(null), 3500);
+                }, delay);
+            }
+        });
+
         socket.on("join_ack", (payload) => {
             if (!payload) return;
             
@@ -280,12 +310,27 @@ export default function Auction() {
             if (payload.userId) setUserId(payload.userId);
             if (Array.isArray(payload.team)) setTeam(payload.team);
             if (typeof payload.budget === "number") setBudget(Number(payload.budget));
-            if (payload.queue) setQueueInfo(payload.queue);
+            if (payload.queue) {
+                setQueueInfo(payload.queue);
+                if (payload.queue.currentSetName) setCurrentSet(payload.queue.currentSetName);
+            }
             if (Array.isArray(payload.bidHistory)) setBidHistory(payload.bidHistory);
             if (typeof payload.isSpectator === "boolean") setIsSpectator(payload.isSpectator);
             
             if (payload.isWithdrawn) {
                 setEliminated(true);
+            }
+
+            if (payload.roomStatus === "picking") {
+                navigate("/result", {
+                    state: {
+                        team: payload.team || [],
+                        disqualified: Array.isArray(payload?.disqualified) ? payload.disqualified.includes(username) : false,
+                        deadline: payload?.deadline || null,
+                        selectionStartTime: payload?.selectionStartTime || null,
+                    },
+                });
+                return;
             }
 
             if (payload.currentPlayer) {
@@ -314,7 +359,7 @@ export default function Auction() {
     }, [navigate, roomId, username, teamName, refreshPlayerStatus, refreshPurses, userId]);
 
     const placeBid = (amount) => {
-        if (eliminated || isSpectator) return;
+        if (eliminated || isSpectator || hasVotedSkip) return;
         socket.emit("place_bid", amount);
         const rounded = Math.round(Number(amount) * 100) / 100;
         setLastMyBid(rounded);
@@ -342,6 +387,14 @@ export default function Auction() {
         setTimeout(() => setPassOverlay(false), 1500);
     };
 
+    const skipPool = () => {
+        if (isSpectator || hasVotedSkip) return;
+        const confirmed = window.confirm("Are you sure you want to skip the ENTIRE current pool? Once you vote skip, you cannot bid on any players in this set, and the skip will take effect after the current player is finalized.");
+        if (!confirmed) return;
+        setHasVotedSkip(true);
+        socket.emit("skip_pool");
+    };
+
     const sendChat = () => {
         const text = chatInput.trim();
         if (!text) return;
@@ -349,9 +402,8 @@ export default function Auction() {
         setChatInput("");
     };
 
-    const completedCount = Number(queueInfo.completed ?? playerStatus?.sold?.length ?? 0);
-    const remainingCount = Number(queueInfo.remaining ?? playerStatus?.remaining?.length ?? 0);
-    const totalCount = completedCount + remainingCount;
+    const currentIdx = Number(queueInfo.currentIndex ?? 0);
+    const totalCount = Number(queueInfo.total ?? 0);
 
     return (
         <div
@@ -400,7 +452,7 @@ export default function Auction() {
                     <div className="flex items-center gap-8">
                         <div className="flex flex-col items-end">
                             <span className="text-[10px] text-slate-500 font-bold uppercase tracking-widest mb-1">Progress</span>
-                            <span className="text-lg font-black text-white italic">{completedCount} <span className="text-xs text-slate-500 font-medium tracking-normal not-italic">/ {totalCount} Players</span></span>
+                            <span className="text-lg font-black text-white italic">{currentIdx} <span className="text-xs text-slate-500 font-medium tracking-normal not-italic">/ {totalCount} Players</span></span>
                         </div>
                         <div className="h-10 w-px bg-white/10 hidden md:block"></div>
                         <div className="flex flex-col items-end">
@@ -468,39 +520,57 @@ export default function Auction() {
                                 <div className="space-y-4">
                                     <div className="flex flex-col">
                                         <span className="text-[10px] text-slate-400 font-black uppercase tracking-[0.2em] mb-2">Current Bid Leader</span>
-                                        <h3 className="text-4xl font-black text-white italic uppercase tracking-tight">
+                                        <h3 className="text-4xl font-black text-white italic uppercase tracking-tight tabular-nums min-h-[40px]">
                                             {lastBidder || <span className="text-slate-700">NO BIDS</span>}
                                         </h3>
                                     </div>
                                     <div className="flex flex-col">
                                         <span className="text-[10px] text-slate-400 font-black uppercase tracking-[0.2em] mb-2">Current Valuation</span>
-                                        <span className="text-5xl font-black text-accent italic tracking-tighter">
+                                        <span className="text-5xl font-black text-accent italic tracking-tighter tabular-nums">
                                             ₹{Number(currentBid || 0).toFixed(2)} <span className="text-lg">Cr</span>
                                         </span>
                                     </div>
                                 </div>
                                 
                                 <div className="w-full md:w-auto">
-                                    {warning && (
-                                        <div className="mb-4 px-4 py-2 bg-rose-500/10 border border-rose-500/20 text-rose-500 text-xs font-black uppercase tracking-widest italic animate-pulse">
-                                            {warning}
-                                        </div>
-                                    )}
+                                    <div className="h-10 mb-4">
+                                        {warning && (
+                                            <div className="px-4 py-2 bg-rose-500/10 border border-rose-500/20 text-rose-500 text-xs font-black uppercase tracking-widest italic animate-pulse">
+                                                {warning}
+                                            </div>
+                                        )}
+                                    </div>
                                     <div className="mb-6">
                                         <Timer percent={timeLeft.percent} ms={timeLeft.ms} />
                                     </div>
-                                    <BidPanel
-                                        currentBid={currentBid}
-                                        step={step}
-                                        budget={budget}
-                                        onBid={placeBid}
-                                        onWithdraw={withdraw}
-                                        onPass={passPlayer}
-                                        isPassed={hasPassed}
-                                        isEliminated={eliminated}
-                                        isSpectator={isSpectator}
-                                        hasBidder={!!lastBidder}
-                                    />
+                                    <div className="flex flex-col gap-4">
+                                        <BidPanel
+                                            currentBid={currentBid}
+                                            step={step}
+                                            budget={budget}
+                                            onBid={placeBid}
+                                            onWithdraw={withdraw}
+                                            onPass={passPlayer}
+                                            isPassed={hasPassed || hasVotedSkip}
+                                            isEliminated={eliminated}
+                                            isSpectator={isSpectator}
+                                            hasBidder={!!lastBidder}
+                                        />
+                                        <div className="px-4">
+                                            <button 
+                                                className={`w-full py-3 rounded-2xl border border-white/5 bg-white/5 hover:bg-rose-500/10 hover:border-rose-500/20 text-[10px] font-black uppercase tracking-[0.2em] transition-all duration-300 flex items-center justify-center gap-3
+                                                    ${(isSpectator || hasVotedSkip) ? "opacity-30 cursor-not-allowed" : ""}`}
+                                                onClick={skipPool}
+                                                disabled={isSpectator || hasVotedSkip}
+                                            >
+                                                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="m6 17 5-5-5-5"/><path d="m13 17 5-5-5-5"/></svg>
+                                                {hasVotedSkip ? "SKIP VOTE RECORDED" : "Skip Current Pool"} {skipInfo.total > 0 && `(${skipInfo.count}/${skipInfo.total})`}
+                                            </button>
+                                            <p className="text-[9px] text-slate-500 text-center mt-2 font-bold uppercase tracking-widest italic">
+                                                * All participants must vote to skip the entire set after current bid ends
+                                            </p>
+                                        </div>
+                                    </div>
                                 </div>
                             </div>
                         </section>
@@ -626,6 +696,16 @@ export default function Auction() {
                                 {soldOverlay.winner} • ₹{Number(soldOverlay.price || 0).toFixed(2)} CR
                             </div>
                         </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Cinematic POOL SKIPPED Overlay */}
+            {poolSkippedOverlay && (
+                <div className="withdraw-overlay !bg-slate-900/80">
+                    <div className="withdraw-content">
+                        <div className="withdraw-text !text-slate-400">POOL SKIPPED</div>
+                        <div className="withdraw-sub !bg-slate-700 italic font-black uppercase">{poolSkippedOverlay}</div>
                     </div>
                 </div>
             )}

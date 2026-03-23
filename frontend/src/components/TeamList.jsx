@@ -1,4 +1,4 @@
-export default function TeamList({ team, budget = 100 }) {
+export default function TeamList({ team, budget = 120 }) {
     const totalRating = team.reduce((sum, player) => sum + Number(player.rating || 0), 0);
     const groups = {
         batsman: [],

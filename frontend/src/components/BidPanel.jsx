@@ -1,4 +1,4 @@
-import { useState } from "react";
+import React from "react";
 
 export default function BidPanel({ currentBid, step, budget, onBid, onWithdraw, onPass, isPassed = false, isEliminated = false, isSpectator = false, hasBidder = false }) {
     const suggested = hasBidder ? (Number(currentBid) + Number(step)) : Number(currentBid);
@@ -20,7 +20,7 @@ export default function BidPanel({ currentBid, step, budget, onBid, onWithdraw, 
                     disabled={isInteractionDisabled || cannotAfford}
                 >
                     <span className="text-sm font-bold uppercase tracking-widest opacity-70 mb-1">Place Bid</span>
-                    <span className="text-2xl font-black italic tracking-tighter">₹{suggested.toFixed(2)} Cr</span>
+                    <span className="text-2xl font-black italic tracking-tighter tabular-nums">₹{suggested.toFixed(2)} Cr</span>
                 </button>
                 
                 <div className="flex gap-3">
