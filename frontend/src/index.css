@@ -68,3 +68,55 @@
 .animate-sold-reveal {
   animation: sold-reveal 2.5s cubic-bezier(0.23, 1, 0.32, 1) forwards;
 }
+
+/* Set Transition Overlay */
+.set-overlay {
+  @apply fixed inset-0 z-[110] flex items-center justify-center bg-night/90 backdrop-blur-2xl pointer-events-none;
+}
+.set-content {
+  @apply flex flex-col items-center animate-set-reveal;
+}
+.set-label {
+  @apply text-accent text-sm font-black uppercase tracking-[0.5em] mb-4 opacity-70;
+}
+.set-name {
+  @apply text-6xl md:text-8xl font-black italic text-white uppercase tracking-tighter text-center;
+  text-shadow: 0 0 40px rgba(0, 245, 255, 0.3);
+}
+
+@keyframes set-reveal {
+  0% { transform: translateY(40px); opacity: 0; filter: blur(10px); }
+  20% { transform: translateY(0); opacity: 1; filter: blur(0); }
+  80% { transform: translateY(0); opacity: 1; filter: blur(0); }
+  100% { transform: translateY(-40px); opacity: 0; filter: blur(10px); }
+}
+
+.animate-set-reveal {
+  animation: set-reveal 3.8s cubic-bezier(0.23, 1, 0.32, 1) forwards;
+}
+
+/* Withdraw Overlay */
+.withdraw-overlay {
+  @apply fixed inset-0 z-[120] flex items-center justify-center bg-rose-950/40 backdrop-blur-md pointer-events-none;
+}
+.withdraw-content {
+  @apply flex flex-col items-center animate-withdraw-reveal;
+}
+.withdraw-text {
+  @apply text-[10vw] font-black italic tracking-tighter text-white uppercase leading-none select-none;
+  text-shadow: 0 0 40px rgba(244, 63, 94, 0.6);
+}
+.withdraw-sub {
+  @apply mt-4 bg-rose-600 text-white px-6 py-2 rounded-xl font-bold uppercase tracking-widest text-lg;
+}
+
+@keyframes withdraw-reveal {
+  0% { transform: scale(1.5); opacity: 0; filter: brightness(2); }
+  15% { transform: scale(1); opacity: 1; filter: brightness(1); }
+  85% { transform: scale(1); opacity: 1; filter: brightness(1); }
+  100% { transform: scale(0.8); opacity: 0; filter: blur(10px); }
+}
+
+.animate-withdraw-reveal {
+  animation: withdraw-reveal 3s cubic-bezier(0.23, 1, 0.32, 1) forwards;
+}

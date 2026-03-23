@@ -60,6 +60,8 @@ export default function Auction() {
     const [playerStatus, setPlayerStatus] = useState({ sold: [], remaining: [], unsold: [], updatedAt: null });
     const [purses, setPurses] = useState([]);
     const [soldOverlay, setSoldOverlay] = useState(null);
+    const [setTransition, setSetTransition] = useState(null);
+    const [withdrawOverlay, setWithdrawOverlay] = useState(false);
 
     const apiBase = useMemo(() => import.meta.env.VITE_API_URL || "http://localhost:5000", []);
 
@@ -89,9 +91,7 @@ export default function Auction() {
             if (data.counts) {
                 setQueueInfo((prev) => ({
                     ...prev,
-                    completed: (typeof data.counts.sold === 'number' && typeof data.counts.unsold === 'number') 
-                        ? (data.counts.sold + data.counts.unsold) 
-                        : (typeof data.counts.sold === 'number' ? data.counts.sold : prev.completed),
+                    completed: typeof data.counts.sold === 'number' ? data.counts.sold : prev.completed,
                     remaining: typeof data.counts.remaining === 'number' ? data.counts.remaining : prev.remaining,
                 }));
             }
@@ -132,7 +132,7 @@ export default function Auction() {
             setLastBidder(null);
             setWarning(null);
             const base = Number(player.base_price || 0);
-            setStep(base < 10 ? 0.2 : 0.5);
+            setStep(base < 12 ? 0.1 : base < 20 ? 0.25 : 0.5);
         });
 
         socket.on("bid_update", (payload) => {
@@ -175,6 +175,13 @@ export default function Auction() {
             setBidHistory([]);
             refreshPlayerStatus();
             refreshPurses();
+        });
+
+        socket.on("set_transition", (payload) => {
+            if (payload?.setName) {
+                setSetTransition(payload.setName);
+                setTimeout(() => setSetTransition(null), 4000);
+            }
         });
 
         socket.on("auction_complete", (payload) => {
@@ -255,9 +262,13 @@ export default function Auction() {
     };
 
     const withdraw = () => {
-        if (!window.confirm("Are you sure? You will exit the bidding for the ENTIRE auction session. This cannot be undone.")) return;
+        const confirmed = window.confirm("Are you sure you want to withdraw from the auction? You will be disqualified and can only rejoin as a viewer.");
+        if (!confirmed) return;
+        
         setEliminated(true);
+        setWithdrawOverlay(true);
         socket.emit("withdraw_bid");
+        setTimeout(() => setWithdrawOverlay(false), 3000);
     };
 
     const passPlayer = () => {
@@ -273,7 +284,7 @@ export default function Auction() {
         setChatInput("");
     };
 
-    const completedCount = Number(queueInfo.completed ?? (playerStatus?.sold?.length + playerStatus?.unsold?.length) ?? 0);
+    const completedCount = Number(queueInfo.completed ?? playerStatus?.sold?.length ?? 0);
     const remainingCount = Number(queueInfo.remaining ?? playerStatus?.remaining?.length ?? 0);
     const totalCount = completedCount + remainingCount;
 
@@ -318,8 +329,8 @@ export default function Auction() {
                         </div>
                         <div className="h-10 w-px bg-white/10 hidden md:block"></div>
                         <div className="flex flex-col items-end">
-                            <span className="text-[10px] text-slate-500 font-bold uppercase tracking-widest mb-1">Role Filter</span>
-                            <span className="text-sm font-black text-white italic tracking-wide uppercase">{currentPlayer?.role || "—"}</span>
+                            <span className="text-[10px] text-slate-500 font-bold uppercase tracking-widest mb-1">Current Set</span>
+                            <span className="text-sm font-black text-white italic tracking-wide uppercase">{currentPlayer?.setName || "—"}</span>
                         </div>
                     </div>
                 </header>
@@ -347,7 +358,14 @@ export default function Auction() {
                         {/* Current Player Card */}
                         <section className="space-y-4">
                             {currentPlayer ? (
-                                <PlayerCard player={currentPlayer} />
+                                <>
+                                    <div className="flex items-center gap-2 mb-2">
+                                        <span className="bg-accent/10 text-accent text-[10px] font-black uppercase tracking-[0.2em] px-3 py-1 rounded-lg border border-accent/20">
+                                            Current Set: {currentPlayer.setName}
+                                        </span>
+                                    </div>
+                                    <PlayerCard player={currentPlayer} />
+                                </>
                             ) : (
                                 <div className="glass-card p-20 flex flex-center justify-center items-center italic text-slate-500 font-medium tracking-widest uppercase text-center">
                                     {queueInfo.completed != null || queueInfo.remaining != null ? "Rejoining live auction..." : "Waiting for the auction to start."}
@@ -360,18 +378,6 @@ export default function Auction() {
                             <div className="absolute top-0 right-0 p-8 text-[100px] font-black italic text-white/5 select-none pointer-events-none uppercase tracking-tighter">
                                 BIDDING
                             </div>
-
-                            {eliminated && (
-                                <div className="absolute inset-0 z-20 bg-black/60 backdrop-blur-sm flex items-center justify-center">
-                                    <div className="text-center p-8 bg-white/5 border border-white/10 rounded-3xl max-w-sm animate-slide-up">
-                                        <div className="text-rose-500 text-6xl font-black italic uppercase tracking-tighter mb-4">EXITED</div>
-                                        <p className="text-xs font-black uppercase tracking-[0.2em] text-white italic">You have withdrawn from the bidding.</p>
-                                        <p className="text-[10px] text-slate-500 font-bold mt-4 uppercase tracking-widest leading-relaxed">
-                                            Awaiting auction finale to finalize Playing XI selection.
-                                        </p>
-                                    </div>
-                                </div>
-                            )}
 
                             <div className="relative z-10 flex flex-col md:flex-row justify-between items-end gap-8">
                                 <div className="space-y-4">
@@ -404,6 +410,7 @@ export default function Auction() {
                                         onPass={passPlayer}
                                         isPassed={hasPassed}
                                         isEliminated={eliminated}
+                                        hasBidder={!!lastBidder}
                                     />
                                 </div>
                             </div>
@@ -428,7 +435,7 @@ export default function Auction() {
                                                 <span className="text-white font-bold text-sm uppercase italic tracking-tight">{h.by || "—"}</span>
                                                 <span className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">{h.note || "BID"}</span>
                                             </div>
-                                            <span className="text-lg font-black text-accent italic tracking-tighter">₹{Number(h.amount).toFixed(2)} Cr</span>
+                                            <span className="text-lg font-black text-accent italic tracking-tighter">₹{h.amount} Cr</span>
                                         </div>
                                     ))}
                                 </div>
@@ -475,6 +482,26 @@ export default function Auction() {
                     />
                 </footer>
             </div>
+
+            {/* Set Transition Overlay */}
+            {setTransition && (
+                <div className="set-overlay">
+                    <div className="set-content">
+                        <div className="set-label">Next Category</div>
+                        <div className="set-name">{setTransition}</div>
+                    </div>
+                </div>
+            )}
+
+            {/* Cinematic WITHDRAWN Overlay */}
+            {withdrawOverlay && (
+                <div className="withdraw-overlay">
+                    <div className="withdraw-content">
+                        <div className="withdraw-text">WITHDRAWN</div>
+                        <div className="withdraw-sub italic font-black">AUCTION TERMINATED FOR YOU</div>
+                    </div>
+                </div>
+            )}
 
             {/* Cinematic SOLD Overlay */}
             {soldOverlay && (

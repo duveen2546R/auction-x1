@@ -38,12 +38,52 @@ function shuffle(array) {
     .map(({ sort, ...rest }) => rest);
 }
 
+function organizePlayersIntoSets(players) {
+  const isIndian = (p) => (p.country || "").toLowerCase() === "india";
+  const getRole = (p) => (p.role || "").toLowerCase();
+
+  const isWk = (p) => getRole(p).includes("keep") || getRole(p).includes("wk");
+  const isAr = (p) => getRole(p).includes("all");
+  const isBat = (p) => getRole(p).includes("bat") || getRole(p).includes("open") || getRole(p).includes("middle");
+  const isBowl = (p) => getRole(p).includes("bowl") || getRole(p).includes("pace") || getRole(p).includes("spin");
+
+  const categories = [
+    { name: "Indian Batsmen", filter: (p) => isIndian(p) && isBat(p) && !isAr(p) && !isWk(p) },
+    { name: "Overseas Batsmen", filter: (p) => !isIndian(p) && isBat(p) && !isAr(p) && !isWk(p) },
+    { name: "Indian All-Rounders", filter: (p) => isIndian(p) && isAr(p) },
+    { name: "Overseas All-Rounders", filter: (p) => !isIndian(p) && isAr(p) },
+    { name: "Indian Bowlers", filter: (p) => isIndian(p) && isBowl(p) && !isAr(p) },
+    { name: "Overseas Bowlers", filter: (p) => !isIndian(p) && isBowl(p) && !isAr(p) },
+    { name: "Indian Wicketkeepers", filter: (p) => isIndian(p) && isWk(p) },
+    { name: "Overseas Wicketkeepers", filter: (p) => !isIndian(p) && isWk(p) },
+  ];
+
+  let orderedQueue = [];
+  const processedIds = new Set();
+
+  categories.forEach((cat) => {
+    const setPlayers = players.filter(cat.filter).filter((p) => !processedIds.has(p.id));
+    // Shuffle within the set
+    const shuffledSet = shuffle(setPlayers).map((p) => ({ ...p, setName: cat.name }));
+    orderedQueue = [...orderedQueue, ...shuffledSet];
+    setPlayers.forEach((p) => processedIds.add(p.id));
+  });
+
+  // Add any remaining players who didn't fit
+  const remaining = players.filter((p) => !processedIds.has(p.id));
+  if (remaining.length > 0) {
+    orderedQueue = [...orderedQueue, ...shuffle(remaining).map((p) => ({ ...p, setName: "Other Players" }))];
+  }
+
+  return orderedQueue;
+}
+
 function createRoom(roomId) {
-  const shuffledPlayers = shuffle(playersMaster);
+  const queuedPlayers = organizePlayersIntoSets(playersMaster);
   return {
     roomId,
     dbId: null,
-    playersQueue: shuffledPlayers,
+    playersQueue: queuedPlayers,
     idx: 0,
     users: new Map(),
     currentPlayer: null,
@@ -386,24 +426,87 @@ function evaluatePlaying11(room, socketId, playerIds) {
   };
 }
 
-function startNextPlayer(roomId) {
+async function startNextPlayer(roomId) {
   const room = rooms.get(roomId);
   if (!room) return;
-  room.finalizingBid = false;
+
   if (room.timer) {
     clearInterval(room.timer);
     room.timer = null;
   }
 
-  if (room.idx >= room.playersQueue.length) {
+  // Find the next player in the queue who hasn't been sold or marked unsold
+  let nextPlayer = null;
+  while (room.idx < room.playersQueue.length) {
+    const candidate = room.playersQueue[room.idx];
+    room.idx += 1;
+
+    if (room.dbId) {
+      try {
+        const [sold] = await pool.query(
+          "SELECT id FROM team_players WHERE room_id = ? AND player_id = ? LIMIT 1",
+          [room.dbId, candidate.id]
+        );
+        const [unsold] = await pool.query(
+          "SELECT id FROM unsold_players WHERE room_id = ? AND player_id = ? LIMIT 1",
+          [room.dbId, candidate.id]
+        );
+        if (sold.length === 0 && unsold.length === 0) {
+          nextPlayer = candidate;
+          break;
+        }
+      } catch (err) {
+        console.error("Error checking player status in startNextPlayer", err.message);
+        nextPlayer = candidate; // Fallback
+        break;
+      }
+    } else {
+      nextPlayer = candidate;
+      break;
+    }
+  }
+
+  if (!nextPlayer) {
     endAuction(roomId);
     return;
   }
 
-  const player = room.playersQueue[room.idx];
-  room.idx += 1;
+  const player = nextPlayer;
+  const isNewSet = !room.currentPlayer || room.currentPlayer.setName !== player.setName;
+
+  if (isNewSet) {
+    io.to(roomId).emit("set_transition", { setName: player.setName });
+    // Wait for the transition animation to play before showing the player
+    setTimeout(() => {
+      room.currentPlayer = player;
+      room.currentBid = Number(player.base_price || 0);
+      room.highestBidder = null;
+      room.highestBidderUserId = null;
+      room.highestBidderName = null;
+      room.status = "running";
+      room.lastBidAt = Date.now();
+      room.warnedOnce = false;
+      room.warnedTwice = false;
+      room.passedUsers = new Set();
+      room.bidHistory = [];
+
+      if (room.dbId) {
+        pool
+          .query("UPDATE rooms SET status = 'ongoing' WHERE id = ?", [room.dbId])
+          .catch((err) => console.error("Failed to mark room ongoing", err.message));
+      }
+
+      io.to(roomId).emit("new_player", player);
+      io.to(roomId).emit("bid_update", { amount: room.currentBid, by: null, history: room.bidHistory || [] });
+      emitQueueUpdate(roomId);
+      startTimer(roomId);
+      maybeAutoResolve(roomId);
+    }, 4000); // 4 second delay for the set transition animation
+    return;
+  }
+
   room.currentPlayer = player;
-  room.currentBid = Number(player.base_price) || 0;
+  room.currentBid = Number(player.base_price || 0);
   room.highestBidder = null;
   room.highestBidderUserId = null;
   room.highestBidderName = null;
@@ -412,7 +515,6 @@ function startNextPlayer(roomId) {
   room.warnedOnce = false;
   room.warnedTwice = false;
   room.passedUsers = new Set();
-  // keep blockedUsers across players
   room.bidHistory = [];
 
   if (room.dbId) {
@@ -553,6 +655,7 @@ async function finalizeBid(roomId) {
       }
     }
   } finally {
+    room.finalizingBid = false;
     setTimeout(() => startNextPlayer(roomId), 1500);
   }
 }
@@ -725,7 +828,11 @@ function handleBid(socket, amount) {
   const numericBid = Math.round(Number(amount) * 100) / 100;
   const currentBidRounded = Math.round(room.currentBid * 100) / 100;
   const step = currentBidRounded < 10 ? 0.2 : 0.5;
-  if (Number.isNaN(numericBid) || numericBid < currentBidRounded + step - 1e-9) return;
+  
+  // If no one has bid yet, allow bidding the base price (room.currentBid)
+  const minRequired = room.highestBidder ? (currentBidRounded + step) : currentBidRounded;
+  
+  if (Number.isNaN(numericBid) || numericBid < minRequired - 1e-9) return;
 
   const user = room.users.get(socket.id);
   if (user && numericBid > (user.budget ?? 100)) {

@@ -1,7 +1,7 @@
 import { useState } from "react";
 
-export default function BidPanel({ currentBid, step, budget, onBid, onWithdraw, onPass, isPassed = false, isEliminated = false }) {
-    const suggested = Number(currentBid) + Number(step);
+export default function BidPanel({ currentBid, step, budget, onBid, onWithdraw, onPass, isPassed = false, isEliminated = false, hasBidder = false }) {
+    const suggested = hasBidder ? (Number(currentBid) + Number(step)) : Number(currentBid);
     const cannotAfford = suggested > (budget || 0);
 
     const placeBid = () => {
