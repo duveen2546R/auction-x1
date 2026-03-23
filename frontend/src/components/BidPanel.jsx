@@ -1,6 +1,6 @@
 import { useState } from "react";
 
-export default function BidPanel({ currentBid, step, budget, onBid, onWithdraw, onPass, isPassed = false, isEliminated = false, hasBidder = false }) {
+export default function BidPanel({ currentBid, step, budget, onBid, onWithdraw, onPass, isPassed = false, isEliminated = false, isSpectator = false, hasBidder = false }) {
     const suggested = hasBidder ? (Number(currentBid) + Number(step)) : Number(currentBid);
     const cannotAfford = suggested > (budget || 0);
 
@@ -8,24 +8,26 @@ export default function BidPanel({ currentBid, step, budget, onBid, onWithdraw, 
         onBid(suggested);
     };
 
+    const isInteractionDisabled = isPassed || isEliminated || isSpectator;
+
     return (
         <div className="flex flex-col gap-6 p-4">
             <div className="flex flex-wrap items-center gap-4">
                 <button
                     className={`primary-btn px-10 py-5 text-xl flex flex-col items-center justify-center min-w-[240px]
-                               ${(isPassed || isEliminated || cannotAfford) ? "opacity-30 cursor-not-allowed saturate-0" : ""}`}
+                               ${(isInteractionDisabled || cannotAfford) ? "opacity-30 cursor-not-allowed saturate-0" : ""}`}
                     onClick={placeBid}
-                    disabled={isPassed || isEliminated || cannotAfford}
+                    disabled={isInteractionDisabled || cannotAfford}
                 >
                     <span className="text-sm font-bold uppercase tracking-widest opacity-70 mb-1">Place Bid</span>
                     <span className="text-2xl font-black italic tracking-tighter">₹{suggested.toFixed(2)} Cr</span>
                 </button>
                 
                 <div className="flex gap-3">
-                    <button className="ghost-btn px-6 py-4" onClick={onWithdraw} disabled={isEliminated}>
+                    <button className="ghost-btn px-6 py-4" onClick={onWithdraw} disabled={isEliminated || isSpectator}>
                         Withdraw
                     </button>
-                    <button className="ghost-btn px-6 py-4" onClick={onPass} disabled={isPassed || isEliminated}>
+                    <button className="ghost-btn px-6 py-4" onClick={onPass} disabled={isPassed || isEliminated || isSpectator}>
                         Pass
                     </button>
                 </div>

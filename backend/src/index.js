@@ -323,10 +323,15 @@ async function getRoomPursesSnapshot(roomDbId) {
 function broadcastPlayers(roomId) {
   const room = rooms.get(roomId);
   if (!room) return;
-  const players = Array.from(room.users.values()).map((u) => ({
-    username: u.username,
-    team: u.teamName || null,
-  }));
+  
+  // Filter out spectators (blocked users) from the public franchise list
+  const players = Array.from(room.users.entries())
+    .filter(([socketId]) => !room.blockedUsers.has(socketId))
+    .map(([, u]) => ({
+      username: u.username,
+      team: u.teamName || null,
+    }));
+    
   io.to(roomId).emit("players_update", players);
 }
 
@@ -1054,10 +1059,12 @@ io.on("connection", (socket) => {
 
   socket.on("start_auction", (roomId) => {
     const resolvedRoom = roomId || socket.data.roomId;
+    if (!resolvedRoom) return;
     const room = getRoom(resolvedRoom);
     if (room.status === "running") return;
     io.to(resolvedRoom).emit("start_auction");
-    setTimeout(() => startNextPlayer(resolvedRoom), 800);
+    // Increased to 3 seconds to ensure all users have time to navigate and join
+    setTimeout(() => startNextPlayer(resolvedRoom), 3000);
   });
 
   socket.on("place_bid", (amount) => handleBid(socket, amount));

@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo, useCallback } from "react";
+import { useEffect, useState, useMemo, useCallback, useRef } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import socket from "../socket";
 import PlayerCard from "../components/PlayerCard";
@@ -419,8 +419,13 @@ export default function Auction() {
                                     <PlayerCard player={currentPlayer} />
                                 </>
                             ) : (
-                                <div className="glass-card p-20 flex flex-center justify-center items-center italic text-slate-500 font-medium tracking-widest uppercase text-center">
-                                    {queueInfo.completed != null || queueInfo.remaining != null ? "Rejoining live auction..." : "Waiting for the auction to start."}
+                                <div className="glass-card p-20 flex flex-col justify-center items-center gap-4 animate-pulse">
+                                    <div className="w-12 h-12 border-4 border-accent/20 border-t-accent rounded-full animate-spin"></div>
+                                    <div className="italic text-slate-500 font-bold tracking-widest uppercase text-center text-xs">
+                                        {queueInfo.completed != null || queueInfo.remaining != null 
+                                            ? "Synchronizing Live Auction State..." 
+                                            : "Awaiting Next Player Selection..."}
+                                    </div>
                                 </div>
                             )}
                         </section>
@@ -465,6 +470,7 @@ export default function Auction() {
                                         onPass={passPlayer}
                                         isPassed={hasPassed}
                                         isEliminated={eliminated}
+                                        isSpectator={isSpectator}
                                         hasBidder={!!lastBidder}
                                     />
                                 </div>
