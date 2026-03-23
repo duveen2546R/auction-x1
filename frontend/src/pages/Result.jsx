@@ -99,12 +99,6 @@ export default function Result() {
     }, []);
 
     useEffect(() => {
-        if (team.length >= 11 && selected.length === 0) {
-            setSelected(team.slice(0, 11).map((p) => p.id));
-        }
-    }, [team, selected.length]);
-
-    useEffect(() => {
         if (!deadline) return;
         const tick = () => {
             const ms = deadline - Date.now();
@@ -302,7 +296,7 @@ export default function Result() {
                                             {results.map((r, idx) => (
                                                 <div key={idx} className="flex justify-between items-center bg-white/5 border border-white/5 p-4 rounded-xl hover:bg-white/10 transition">
                                                     <div className="flex flex-col">
-                                                        <span className="text-white font-bold text-sm uppercase italic tracking-tight">{r.username}</span>
+                                                        <span className="text-white font-bold text-sm uppercase italic tracking-tight">{r.teamName || r.username}</span>
                                                         <div className="flex gap-2 mt-1">
                                                             <span className="text-[8px] text-slate-500 font-bold uppercase tracking-widest">B {r.breakdown.battingTotal}</span>
                                                             <span className="text-[8px] text-slate-500 font-bold uppercase tracking-widest">W {r.breakdown.bowlingTotal}</span>
@@ -338,4 +332,3 @@ export default function Result() {
         </div>
     );
 }
-

@@ -68,9 +68,6 @@ export default function Home() {
                             <span className="text-xs font-bold text-slate-200 uppercase tracking-tight">{p.name}</span>
                             <span className="text-[8px] text-slate-500 font-bold uppercase tracking-widest">{(p.country || "").toLowerCase() !== "india" ? "Overseas" : "Indian"}</span>
                         </div>
-                        <div className="flex gap-2">
-                            <span className="text-[10px] font-black text-accent italic">⭐{p.batting_rating ?? p.rating}</span>
-                        </div>
                     </div>
                 ))}
             </div>

@@ -33,17 +33,6 @@ export default function PlayerCard({ player }) {
                                 Base Price: <span className="text-white font-bold">₹{Number(player.base_price || 0).toFixed(2)} Cr</span>
                             </p>
                         </div>
-                        
-                        <div className="flex gap-4">
-                            <div className="stat-card">
-                                <span className="text-[10px] text-slate-400 font-bold uppercase tracking-widest mb-1">Batting</span>
-                                <span className="text-2xl font-black text-white">{player.batting_rating ?? player.rating}</span>
-                            </div>
-                            <div className="stat-card">
-                                <span className="text-[10px] text-slate-400 font-bold uppercase tracking-widest mb-1">Bowling</span>
-                                <span className="text-2xl font-black text-white">{player.bowling_rating ?? player.rating}</span>
-                            </div>
-                        </div>
                     </div>
                 </div>
                 

@@ -58,10 +58,6 @@ export default function TeamList({ team, budget = 100 }) {
                     <span className="text-3xl font-black text-white italic tracking-tighter">₹{Number(budget || 0).toFixed(2)} <span className="text-sm">Cr Left</span></span>
                     <div className="mt-2 flex items-center gap-4">
                         <div className="flex flex-col">
-                            <span className="text-[9px] text-slate-500 font-bold uppercase tracking-widest">Rating</span>
-                            <span className="text-sm font-black text-white italic tracking-widest">{Number(totalRating || 0).toFixed(1)}</span>
-                        </div>
-                        <div className="flex flex-col">
                             <span className="text-[9px] text-slate-500 font-bold uppercase tracking-widest">Squad Size</span>
                             <span className="text-sm font-black text-white italic tracking-widest">{team.length} / 11</span>
                         </div>

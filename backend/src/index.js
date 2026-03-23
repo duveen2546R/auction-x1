@@ -97,9 +97,11 @@ function createRoom(roomId) {
     lastBidAt: Date.now(),
     warnedOnce: false,
     warnedTwice: false,
+    totalDuration: 13000,
     bidHistory: [],
     passedUsers: new Set(),
     blockedUsers: new Set(),
+    withdrawnUsers: new Set(),
     playing11: new Map(),
     disqualified: new Set(),
     finalizingBid: false,
@@ -135,7 +137,8 @@ function getQueueState(room) {
 }
 
 function getHighestBidderName(room) {
-  return room.users.get(room.highestBidder || "")?.username || room.highestBidderName || null;
+  const user = room.users.get(room.highestBidder || "");
+  return user?.teamName || user?.username || room.highestBidderName || null;
 }
 
 function getHighestBidderEntry(room) {
@@ -197,6 +200,7 @@ function migrateSocketIdentity(room, previousSocketId, nextSocketId) {
 
   moveSetMembership(room.passedUsers, previousSocketId, nextSocketId);
   moveSetMembership(room.blockedUsers, previousSocketId, nextSocketId);
+  moveSetMembership(room.withdrawnUsers, previousSocketId, nextSocketId);
   moveSetMembership(room.disqualified, previousSocketId, nextSocketId);
   moveMapMembership(room.playing11, previousSocketId, nextSocketId);
 }
@@ -211,7 +215,7 @@ async function ensureRoomPlayerRow(roomDbId, userId, teamName, teamId) {
   );
 
   if (!existingRows.length) {
-    let initialBudget = 100;
+    let initialBudget = 120;
     if (teamId) {
       try {
         const [teams] = await pool.query("SELECT budget FROM teams WHERE id = ?", [teamId]);
@@ -255,7 +259,7 @@ async function ensureRoomPlayerRow(roomDbId, userId, teamName, teamId) {
   }
 
   return {
-    budget: Number(latestRow.budget ?? 100),
+    budget: Number(latestRow.budget ?? 120),
     teamName: nextTeamName,
     duplicateCount: duplicateRows.length,
   };
@@ -345,28 +349,28 @@ function startTimer(roomId) {
   if (room.timer) clearInterval(room.timer);
   room.timer = setInterval(async () => {
     const idleMs = Date.now() - (room.lastBidAt || 0);
-    const totalDuration = 13000;
+    const totalDuration = room.totalDuration || 13000;
     const remainingMs = Math.max(0, totalDuration - idleMs);
 
     io.to(roomId).emit("timer_tick", { 
       remainingMs, 
       totalMs: totalDuration,
-      percent: (remainingMs / totalDuration) * 100 
+      percent: (remainingMs / totalDuration) * 120 
     });
 
-    if (!room.warnedOnce && idleMs >= 7000) {
+    if (!room.warnedOnce && remainingMs <= 6000) {
       room.warnedOnce = true;
       io.to(roomId).emit("bid_warning", { stage: "once", by: getHighestBidderName(room) || "No bids" });
-    } else if (room.warnedOnce && !room.warnedTwice && idleMs >= 10000) {
+    } else if (room.warnedOnce && !room.warnedTwice && remainingMs <= 3000) {
       room.warnedTwice = true;
       io.to(roomId).emit("bid_warning", { stage: "twice", by: getHighestBidderName(room) || "No bids" });
-    } else if (room.warnedTwice && idleMs >= 13000) {
+    } else if (idleMs >= totalDuration) {
       clearInterval(room.timer);
       room.timer = null;
       await finalizeBid(roomId);
       return;
     }
-  }, 1000);
+  }, 1200);
 }
 
 function maybeAutoResolve(roomId) {
@@ -443,7 +447,7 @@ function evaluatePlaying11(room, socketId, playerIds) {
   if (ars > 4) return { ok: false, reason: "Max 4 all-rounders" };
   if (overseas > 4) return { ok: false, reason: "Max 4 overseas players" };
 
-  const balanceBonus = 100;
+  const balanceBonus = 120;
   const score = battingTotal * 0.45 + bowlingTotal * 0.45 + balanceBonus * 0.1;
 
   return {
@@ -538,6 +542,7 @@ async function startNextPlayer(roomId) {
   room.highestBidderUserId = null;
   room.highestBidderName = null;
   room.status = "running";
+  room.totalDuration = 13000;
   room.lastBidAt = Date.now();
   room.warnedOnce = false;
   room.warnedTwice = false;
@@ -567,11 +572,11 @@ async function finalizeBid(roomId) {
 
   const [winnerSocketId, liveWinner] = getHighestBidderEntry(room);
   const winnerUserId = liveWinner?.userId || room.highestBidderUserId || null;
-  const winnerName = liveWinner?.username || room.highestBidderName || null;
+  const winnerName = getHighestBidderName(room);
 
   try {
     if (winnerUserId || liveWinner) {
-      let currentBudget = Number(liveWinner?.budget ?? 100);
+      let currentBudget = Number(liveWinner?.budget ?? 120);
       
       // If we have a DB ID, always double check the budget from DB to be safe
       if (room.dbId && winnerUserId) {
@@ -737,8 +742,8 @@ function endAuction(roomId) {
   room.disqualified = disqualified;
   const dqNames = Array.from(disqualified).map((sid) => room.users.get(sid)?.username).filter(Boolean);
 
-  room.selectDeadline = Date.now() + 2 * 60 * 1000; // 2 minutes
-  setTimeout(() => autoFinalizePlaying11(roomId), 2 * 60 * 1000 + 500);
+  room.selectDeadline = Date.now() + 2 * 60 * 1200; // 2 minutes
+  setTimeout(() => autoFinalizePlaying11(roomId), 2 * 60 * 1200 + 500);
 
   io.to(roomId).emit("auction_complete", {
     stage: "select11",
@@ -837,8 +842,8 @@ async function autoFinalizePlaying11(roomId) {
   room.disqualified = disqualified;
   if (room.playing11.size + disqualified.size >= active.length) {
     const results = Array.from(room.playing11.values()).sort((a, b) => b.score - a.score);
-    const winnerName = results[0]?.username || "No winner";
-    const dqNames = Array.from(disqualified).map((sid) => room.users.get(sid)?.username).filter(Boolean);
+    const winnerName = results[0]?.teamName || results[0]?.username || "No winner";
+    const dqNames = Array.from(disqualified).map((sid) => room.users.get(sid)?.teamName || room.users.get(sid)?.username).filter(Boolean);
     io.to(roomId).emit("playing11_results", { winner: winnerName, results, disqualified: dqNames });
     room.status = "finished_finalized";
   }
@@ -852,8 +857,8 @@ function handleBid(socket, amount) {
   if (room.passedUsers.has(socket.id)) return;
   if (room.highestBidder === socket.id) return; // prevent consecutive self-bids
 
-  const numericBid = Math.round(Number(amount) * 100) / 100;
-  const currentBidRounded = Math.round(room.currentBid * 100) / 100;
+  const numericBid = Math.round(Number(amount) * 120) / 120;
+  const currentBidRounded = Math.round(room.currentBid * 120) / 120;
   const step = currentBidRounded < 10 ? 0.2 : 0.5;
   
   // If no one has bid yet, allow bidding the base price (room.currentBid)
@@ -862,28 +867,37 @@ function handleBid(socket, amount) {
   if (Number.isNaN(numericBid) || numericBid < minRequired - 1e-9) return;
 
   const user = room.users.get(socket.id);
-  if (user && numericBid > (user.budget ?? 100)) {
+  if (user && numericBid > (user.budget ?? 120)) {
     socket.emit("bid_error", { reason: "Insufficient budget" });
     return;
   }
 
+  const idleMs = Date.now() - (room.lastBidAt || 0);
+  const remainingMs = Math.max(0, (room.totalDuration || 13000) - idleMs);
+
+  // Add 5 seconds to the current remaining time
+  // Cap at 15 seconds to prevent excessive timer growth
+  const newRemainingMs = Math.min(15000, remainingMs + 5000);
+  room.totalDuration = newRemainingMs;
+  
+  const bidderName = user?.teamName || socket.data.username;
   room.currentBid = numericBid;
   room.highestBidder = socket.id;
   room.highestBidderUserId = user?.userId || null;
-  room.highestBidderName = socket.data.username;
+  room.highestBidderName = bidderName;
   room.lastBidAt = Date.now();
   room.warnedOnce = false;
   room.warnedTwice = false;
   room.passedUsers.delete(socket.id);
   room.bidHistory.push({
     amount: room.currentBid,
-    by: socket.data.username,
+    by: bidderName,
     ts: Date.now(),
   });
 
   io.to(roomId).emit("bid_update", {
     amount: room.currentBid,
-    by: socket.data.username,
+    by: bidderName,
     history: room.bidHistory.slice(-10),
     step: room.currentBid < 10 ? 0.2 : 0.5,
   });
@@ -909,7 +923,7 @@ io.on("connection", (socket) => {
 
     let userId = null;
     let roomDbId = null;
-    let budget = 100;
+    let budget = 120;
     let teamId = null;
     let persistedTeam = [];
     try {
@@ -938,7 +952,7 @@ io.on("connection", (socket) => {
       }
 
       const roomPlayerRow = await ensureRoomPlayerRow(roomDbId, userId, cleanTeam, teamId);
-      budget = Number(roomPlayerRow.budget ?? 100);
+      budget = Number(roomPlayerRow.budget ?? 120);
       cleanTeam = cleanTeam || roomPlayerRow.teamName || null;
       if (roomPlayerRow.duplicateCount) {
         console.warn(
@@ -983,7 +997,7 @@ io.on("connection", (socket) => {
     }
 
     const team = persistedTeam.length ? persistedTeam : existingUser?.team || [];
-    const mergedBudget = budget ?? existingUser?.budget ?? 100;
+    const mergedBudget = budget ?? existingUser?.budget ?? 120;
     const mergedUser = {
       username: cleanName,
       team,
@@ -1023,6 +1037,7 @@ io.on("connection", (socket) => {
       queue: getQueueState(room),
       roomStatus: room.status,
       isSpectator,
+      isWithdrawn: room.withdrawnUsers.has(socket.id),
     });
     if (room.currentPlayer) {
       socket.emit("new_player", room.currentPlayer);
@@ -1075,6 +1090,7 @@ io.on("connection", (socket) => {
     if (!room) return;
     
     room.blockedUsers.add(socket.id);
+    room.withdrawnUsers.add(socket.id);
 
     if (room.currentPlayer && room.highestBidder === socket.id) {
       room.bidHistory.push({

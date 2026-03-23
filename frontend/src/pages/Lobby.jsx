@@ -52,7 +52,7 @@ export default function Lobby() {
             }
             isInitialJoin.current = false;
 
-            if (payload.roomStatus && payload.roomStatus !== "waiting") {
+            if (payload.isWithdrawn || (payload.roomStatus && payload.roomStatus !== "waiting")) {
                 navigate(`/auction/${roomId}`, { state: { username, teamName } });
             }
         });

@@ -70,6 +70,7 @@ export default function Auction() {
     const [reconnectOverlay, setReconnectOverlay] = useState(false);
     const [timeLeft, setTimeLeft] = useState({ percent: 100, ms: 13000 });
     const isInitialJoin = useRef(true);
+    const countdownAudio = useRef(new Audio("/countdown.mp3"));
 
     const apiBase = useMemo(() => import.meta.env.VITE_API_URL || "http://localhost:5000", []);
 
@@ -141,6 +142,8 @@ export default function Auction() {
 
         socket.on("new_player", (player) => {
             if (!player) return;
+            countdownAudio.current.pause();
+            countdownAudio.current.currentTime = 0;
             setCurrentPlayer(player);
             setCurrentBid(Number(player.base_price || 0));
             setLastBidder(null);
@@ -164,6 +167,8 @@ export default function Auction() {
 
         socket.on("player_won", (data) => {
             if (!data) return;
+            countdownAudio.current.pause();
+            countdownAudio.current.currentTime = 0;
             const currentUserWon =
                 Number(data?.winnerUserId) === Number(userId) ||
                 (!data?.winnerUserId && data?.winner === username);
@@ -229,7 +234,21 @@ export default function Auction() {
         });
 
         socket.on("timer_tick", (data) => {
-            if (data) setTimeLeft({ percent: data.percent, ms: data.remainingMs });
+            if (data) {
+                setTimeLeft({ percent: data.percent, ms: data.remainingMs });
+                
+                // Play countdown for last 5 seconds
+                if (data.remainingMs <= 5000 && data.remainingMs > 0) {
+                    if (countdownAudio.current.paused) {
+                        countdownAudio.current.currentTime = 0;
+                        countdownAudio.current.play().catch(e => console.warn("Audio play blocked", e));
+                    }
+                } else {
+                    // Stop audio if bid increases timer or reaches 0
+                    countdownAudio.current.pause();
+                    countdownAudio.current.currentTime = 0;
+                }
+            }
         });
 
         socket.on("budget_update", (b) => {
@@ -264,6 +283,11 @@ export default function Auction() {
             if (payload.queue) setQueueInfo(payload.queue);
             if (Array.isArray(payload.bidHistory)) setBidHistory(payload.bidHistory);
             if (typeof payload.isSpectator === "boolean") setIsSpectator(payload.isSpectator);
+            
+            if (payload.isWithdrawn) {
+                setEliminated(true);
+            }
+
             if (payload.currentPlayer) {
                 const player = payload.currentPlayer;
                 setCurrentPlayer(player);
@@ -282,6 +306,7 @@ export default function Auction() {
         }, 8000);
 
         return () => {
+            countdownAudio.current.pause();
             socket.off("connect", joinRoom);
             socket.off();
             clearInterval(poll);
@@ -303,7 +328,10 @@ export default function Auction() {
         setEliminated(true);
         setWithdrawOverlay(true);
         socket.emit("withdraw_bid");
-        setTimeout(() => setWithdrawOverlay(false), 3000);
+        
+        setTimeout(() => {
+            setWithdrawOverlay(false);
+        }, 3000);
     };
 
     const passPlayer = () => {
