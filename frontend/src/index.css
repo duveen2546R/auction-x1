@@ -161,14 +161,33 @@
 }
 
 @keyframes unsold-reveal {
-  0% { transform: scale(0.9) translateY(20px); opacity: 0; }
-  15% { transform: scale(1) translateY(0); opacity: 1; }
-  85% { transform: scale(1) translateY(0); opacity: 1; }
+  0% { transform: scale(0.9) translateY(20px); opacity: 0; filter: blur(20px); }
+  15% { transform: scale(1) translateY(0); opacity: 1; filter: blur(0); }
+  85% { transform: scale(1) translateY(0); opacity: 1; filter: blur(0); }
   100% { transform: scale(1.1) translateY(-20px); opacity: 0; filter: blur(10px); }
 }
 
 .animate-unsold-reveal {
   animation: unsold-reveal 2.5s cubic-bezier(0.23, 1, 0.32, 1) forwards;
+}
+
+/* Sliding Timer */
+.timer-container {
+  @apply w-full h-1.5 bg-white/5 rounded-full overflow-hidden relative;
+}
+.timer-bar {
+  @apply h-full bg-accent shadow-[0_0_15px_rgba(0,245,255,0.5)] transition-all duration-1000 ease-linear;
+}
+.timer-bar.warning {
+  @apply bg-rose-500 shadow-[0_0_15px_rgba(244,63,94,0.5)];
+}
+
+@keyframes shimmer {
+  from { background-position: 0 0; }
+  to { background-position: 40px 0; }
+}
+.animate-shimmer {
+  animation: shimmer 2s linear infinite;
 }
 
 /* Home Page Rotation */

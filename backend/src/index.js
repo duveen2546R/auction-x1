@@ -339,6 +339,15 @@ function startTimer(roomId) {
   if (room.timer) clearInterval(room.timer);
   room.timer = setInterval(async () => {
     const idleMs = Date.now() - (room.lastBidAt || 0);
+    const totalDuration = 13000;
+    const remainingMs = Math.max(0, totalDuration - idleMs);
+
+    io.to(roomId).emit("timer_tick", { 
+      remainingMs, 
+      totalMs: totalDuration,
+      percent: (remainingMs / totalDuration) * 100 
+    });
+
     if (!room.warnedOnce && idleMs >= 7000) {
       room.warnedOnce = true;
       io.to(roomId).emit("bid_warning", { stage: "once", by: getHighestBidderName(room) || "No bids" });
@@ -357,13 +366,25 @@ function startTimer(roomId) {
 function maybeAutoResolve(roomId) {
   const room = rooms.get(roomId);
   if (!room || !room.currentPlayer) return;
-  const active = activeSockets(room);
-  if (active.length === 0) {
+  const activeIds = activeSockets(room);
+  if (activeIds.length === 0) {
     endAuction(roomId);
     return;
   }
-  // Remove the active.length === 1 auto-resolution to prevent 
-  // "clicking for purchasing all other players" automatically.
+
+  // If every active player has either passed or is currently the high bidder,
+  // no more bidding is possible. Finalize immediately.
+  const noMoreBidsPossible = activeIds.every(id => 
+    id === room.highestBidder || room.passedUsers.has(id)
+  );
+
+  if (noMoreBidsPossible) {
+    if (room.timer) {
+      clearInterval(room.timer);
+      room.timer = null;
+    }
+    finalizeBid(roomId);
+  }
 }
 
 function emitQueueUpdate(roomId) {
@@ -847,7 +868,7 @@ function handleBid(socket, amount) {
   room.lastBidAt = Date.now();
   room.warnedOnce = false;
   room.warnedTwice = false;
-  room.passedUsers = new Set();
+  room.passedUsers.delete(socket.id);
   room.bidHistory.push({
     amount: room.currentBid,
     by: socket.data.username,
@@ -1055,8 +1076,10 @@ io.on("connection", (socket) => {
         room.timer = null;
       }
       await finalizeBid(roomId);
+    } else {
+      // Check if the remaining active players are either high bidder or already passed
+      maybeAutoResolve(roomId);
     }
-    maybeAutoResolve(roomId);
     if (activeSockets(room).length === 0) {
       endAuction(roomId);
     }

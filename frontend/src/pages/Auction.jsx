@@ -6,6 +6,7 @@ import BidPanel from "../components/BidPanel";
 import TeamList from "../components/TeamList";
 import PlayerStatusList from "../components/PlayerStatusList";
 import TeamPurses from "../components/TeamPurses";
+import Timer from "../components/Timer";
 
 export default function Auction() {
     const { state } = useLocation();
@@ -64,6 +65,7 @@ export default function Auction() {
     const [withdrawOverlay, setWithdrawOverlay] = useState(false);
     const [passOverlay, setPassOverlay] = useState(false);
     const [unsoldOverlay, setUnsoldOverlay] = useState(null);
+    const [timeLeft, setTimeLeft] = useState({ percent: 100, ms: 13000 });
 
     const apiBase = useMemo(() => import.meta.env.VITE_API_URL || "http://localhost:5000", []);
 
@@ -133,6 +135,7 @@ export default function Auction() {
             setCurrentBid(Number(player.base_price || 0));
             setLastBidder(null);
             setWarning(null);
+            setTimeLeft({ percent: 100, ms: 13000 });
             const base = Number(player.base_price || 0);
             setStep(base < 12 ? 0.1 : base < 20 ? 0.25 : 0.5);
         });
@@ -144,6 +147,7 @@ export default function Auction() {
             setCurrentBid(rounded);
             setLastBidder(payload.by);
             setWarning(null);
+            setTimeLeft({ percent: 100, ms: 13000 });
             if (Array.isArray(payload.history)) setBidHistory(payload.history);
             if (payload.step) setStep(Number(payload.step));
         });
@@ -212,6 +216,10 @@ export default function Auction() {
 
         socket.on("chat_message", (msg) => {
             if (msg) setChat((c) => [...c.slice(-50), msg]);
+        });
+
+        socket.on("timer_tick", (data) => {
+            if (data) setTimeLeft({ percent: data.percent, ms: data.remainingMs });
         });
 
         socket.on("budget_update", (b) => {
@@ -410,6 +418,9 @@ export default function Auction() {
                                             {warning}
                                         </div>
                                     )}
+                                    <div className="mb-6">
+                                        <Timer percent={timeLeft.percent} ms={timeLeft.ms} />
+                                    </div>
                                     <BidPanel
                                         currentBid={currentBid}
                                         step={step}
