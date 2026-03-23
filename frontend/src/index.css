@@ -146,17 +146,18 @@
 
 /* Unsold Overlay */
 .unsold-overlay {
-  @apply fixed inset-0 z-[140] flex items-center justify-center bg-slate-950/60 backdrop-blur-md pointer-events-none;
+  @apply fixed inset-0 z-[140] flex items-center justify-center pointer-events-none;
+  background: radial-gradient(circle, rgba(148, 163, 184, 0.15) 0%, transparent 70%);
 }
 .unsold-content {
   @apply flex flex-col items-center animate-unsold-reveal;
 }
 .unsold-text {
-  @apply text-[10vw] font-black italic tracking-tighter text-slate-400 uppercase leading-none select-none;
-  text-shadow: 0 0 40px rgba(148, 163, 184, 0.3);
+  @apply text-[12vw] font-black italic tracking-tighter text-slate-400 uppercase leading-none select-none;
+  text-shadow: 0 0 50px rgba(148, 163, 184, 0.4);
 }
 .unsold-sub {
-  @apply mt-4 border-2 border-slate-500 text-slate-300 px-8 py-2 rounded-xl font-bold uppercase tracking-[0.3em] text-lg;
+  @apply mt-4 bg-slate-800 text-slate-200 px-8 py-3 rounded-2xl font-black italic text-2xl uppercase tracking-widest shadow-glass border border-white/5;
 }
 
 @keyframes unsold-reveal {
@@ -168,4 +169,35 @@
 
 .animate-unsold-reveal {
   animation: unsold-reveal 2.5s cubic-bezier(0.23, 1, 0.32, 1) forwards;
+}
+
+/* Home Page Rotation */
+@keyframes rotate-orbit {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+.animate-orbit {
+  animation: rotate-orbit 60s linear infinite;
+}
+.pause-animation {
+  animation-play-state: paused;
+}
+
+/* Cinematic Outlined Text */
+.text-outline {
+  -webkit-text-stroke: 1px rgba(255, 255, 255, 0.3);
+  color: transparent;
+}
+
+.grainy-bg {
+  position: relative;
+}
+.grainy-bg::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image: url("https://grainy-gradients.vercel.app/noise.svg");
+  opacity: 0.05;
+  pointer-events: none;
+  z-index: 1;
 }

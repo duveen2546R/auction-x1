@@ -147,14 +147,14 @@ export default function Home() {
                                     <div className="space-y-4">
                                         <label className="text-[10px] text-slate-400 font-black uppercase tracking-[0.2em]">Join Existing Arena</label>
                                         <input
-                                            className="w-full rounded-xl border border-white/5 bg-white/10 px-4 py-3 text-sm text-white placeholder-slate-700 focus:outline-none focus:ring-2 focus:ring-accent transition-all text-center tracking-[0.5em] font-black"
+                                            className="w-full rounded-xl border border-white/5 bg-white/5 px-4 py-3 text-sm text-white placeholder-slate-700 focus:outline-none focus:ring-2 focus:ring-accent transition-all text-center tracking-[0.5em] font-black"
                                             placeholder="XXXXXX"
                                             value={roomCode}
                                             onChange={(e) => setRoomCode(e.target.value)}
                                         />
                                     </div>
                                     <button
-                                        className="primary-btn w-full !py-4 !rounded-xl text-sm font-black tracking-[0.2em] uppercase italic disabled:opacity-30 mt-4"
+                                        className="primary-btn w-full !py-4 !rounded-xl text-sm font-black tracking-[0.2em] uppercase italic disabled:opacity-30 transition-all mt-4"
                                         onClick={joinRoom}
                                         disabled={!canProceed || !roomCode}
                                     >
@@ -309,4 +309,3 @@ export default function Home() {
         </div>
     );
 }
-
