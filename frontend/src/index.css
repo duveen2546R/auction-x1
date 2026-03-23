@@ -120,3 +120,26 @@
 .animate-withdraw-reveal {
   animation: withdraw-reveal 3s cubic-bezier(0.23, 1, 0.32, 1) forwards;
 }
+
+/* Pass Overlay */
+.pass-overlay {
+  @apply fixed inset-0 z-[130] flex items-center justify-center pointer-events-none;
+}
+.pass-content {
+  @apply flex flex-col items-center animate-pass-reveal;
+}
+.pass-text {
+  @apply text-[8vw] font-black italic tracking-tighter text-white/40 uppercase leading-none select-none;
+  text-shadow: 0 0 30px rgba(255, 255, 255, 0.1);
+}
+
+@keyframes pass-reveal {
+  0% { transform: scale(0.8); opacity: 0; filter: blur(10px); }
+  20% { transform: scale(1); opacity: 1; filter: blur(0); }
+  80% { transform: scale(1); opacity: 1; filter: blur(0); }
+  100% { transform: scale(1.1); opacity: 0; filter: blur(20px); }
+}
+
+.animate-pass-reveal {
+  animation: pass-reveal 1.5s cubic-bezier(0.23, 1, 0.32, 1) forwards;
+}

@@ -62,6 +62,7 @@ export default function Auction() {
     const [soldOverlay, setSoldOverlay] = useState(null);
     const [setTransition, setSetTransition] = useState(null);
     const [withdrawOverlay, setWithdrawOverlay] = useState(false);
+    const [passOverlay, setPassOverlay] = useState(false);
 
     const apiBase = useMemo(() => import.meta.env.VITE_API_URL || "http://localhost:5000", []);
 
@@ -274,7 +275,9 @@ export default function Auction() {
     const passPlayer = () => {
         if (hasPassed) return;
         setHasPassed(true);
+        setPassOverlay(true);
         socket.emit("pass_player");
+        setTimeout(() => setPassOverlay(false), 1500);
     };
 
     const sendChat = () => {
@@ -489,6 +492,15 @@ export default function Auction() {
                     <div className="set-content">
                         <div className="set-label">Next Category</div>
                         <div className="set-name">{setTransition}</div>
+                    </div>
+                </div>
+            )}
+
+            {/* Cinematic PASSED Overlay */}
+            {passOverlay && (
+                <div className="pass-overlay">
+                    <div className="pass-content">
+                        <div className="pass-text">PASSED</div>
                     </div>
                 </div>
             )}
