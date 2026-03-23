@@ -1011,6 +1011,26 @@ io.on("connection", (socket) => {
     });
     socket.emit("queue_update", getQueueState(room));
     socket.emit("budget_update", { budget: mergedBudget });
+    
+    // Notify others in the room to initiate peer connections
+    socket.to(roomId).emit("user_joined_voice", { socketId: socket.id, username: cleanName });
+  });
+
+  socket.on("voice_signal", (payload) => {
+    io.to(payload.to).emit("voice_signal", {
+      from: socket.id,
+      signal: payload.signal,
+    });
+  });
+
+  socket.on("voice_toggle_mic", (payload) => {
+    const roomId = socket.data.roomId;
+    if (roomId) {
+      socket.to(roomId).emit("voice_toggle_mic", {
+        socketId: socket.id,
+        isMuted: payload.isMuted,
+      });
+    }
   });
 
   socket.on("start_auction", (roomId) => {
@@ -1138,6 +1158,7 @@ io.on("connection", (socket) => {
     if (!room) return;
     room.users.delete(socket.id);
     broadcastPlayers(roomId);
+    io.to(roomId).emit("user_left_voice", { socketId: socket.id });
   });
 });
 

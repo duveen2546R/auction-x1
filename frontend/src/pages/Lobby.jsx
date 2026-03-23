@@ -1,6 +1,7 @@
 import { useEffect, useState, useMemo } from "react";
 import { useParams, useLocation, useNavigate } from "react-router-dom";
 import socket from "../socket";
+import VoiceChat from "../components/VoiceChat";
 
 export default function Lobby() {
     const { roomId } = useParams();
@@ -154,6 +155,7 @@ export default function Lobby() {
                     </footer>
                 </main>
             </div>
+            <VoiceChat roomId={roomId} username={username} />
         </div>
     );
 }

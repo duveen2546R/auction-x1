@@ -7,6 +7,7 @@ import TeamList from "../components/TeamList";
 import PlayerStatusList from "../components/PlayerStatusList";
 import TeamPurses from "../components/TeamPurses";
 import Timer from "../components/Timer";
+import VoiceChat from "../components/VoiceChat";
 
 export default function Auction() {
     const { state } = useLocation();
@@ -324,8 +325,9 @@ export default function Auction() {
                 <header className="flex flex-col md:flex-row items-center justify-between gap-6 pb-8 border-b border-white/5">
                     <div className="flex items-center gap-6">
                         {!sidebarOpen && (
-                            <button className="primary-btn !px-4 !py-2 !rounded-lg text-xs" onClick={() => setSidebarOpen(true)}>
-                                MY TEAM
+                            <button className="primary-btn !px-4 !py-2.5 !rounded-xl text-[10px] font-black tracking-widest uppercase flex items-center gap-2 shadow-accent/20" onClick={() => setSidebarOpen(true)}>
+                                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18"/></svg>
+                                Show Panel
                             </button>
                         )}
                         <div>
@@ -357,7 +359,12 @@ export default function Auction() {
                         <aside className="space-y-6 animate-slide-up">
                             <div className="flex items-center justify-between bg-white/5 p-4 rounded-2xl border border-white/5">
                                 <span className="text-xs font-black uppercase tracking-widest italic text-white">Squad Profile</span>
-                                <button className="text-[10px] font-bold uppercase tracking-widest text-slate-500 hover:text-white transition" onClick={() => setSidebarOpen(false)}>
+                                <button 
+                                    className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-white/5 hover:bg-rose-500/10 text-[10px] font-black uppercase tracking-widest text-slate-400 hover:text-rose-500 border border-white/5 hover:border-rose-500/20 transition-all duration-300 group" 
+                                    onClick={() => setSidebarOpen(false)}
+                                >
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" className="opacity-50 group-hover:opacity-100 transition-opacity">
+                                        <rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18"/></svg>
                                     Hide Panel
                                 </button>
                             </div>
@@ -560,6 +567,7 @@ export default function Auction() {
                     </div>
                 </div>
             )}
+            <VoiceChat roomId={roomId} username={username} />
         </div>
     );
 }
