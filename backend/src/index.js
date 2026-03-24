@@ -20,9 +20,14 @@ app.get("/teams", async (_req, res) => {
 });
 
 const server = http.createServer(app);
+
+// Flexible CORS for Render/Production
+const allowedOrigins = ["http://localhost:5173", process.env.FRONTEND_ORIGIN].filter(Boolean);
+console.log("Allowed CORS Origins:", allowedOrigins.length ? allowedOrigins : "ALL (*)");
+
 const io = new Server(server, {
   cors: {
-    origin: ["http://localhost:5173", process.env.FRONTEND_ORIGIN].filter(Boolean),
+    origin: allowedOrigins.length ? allowedOrigins : true,
     methods: ["GET", "POST"],
   },
 });
@@ -86,6 +91,7 @@ function createRoom(roomId) {
     playersQueue: queuedPlayers,
     idx: 0,
     users: new Map(),
+    voiceUsers: new Set(),
     currentPlayer: null,
     currentBid: 0,
     highestBidder: null,
@@ -105,6 +111,7 @@ function createRoom(roomId) {
     withdrawnUsers: new Set(),
     playing11: new Map(),
     disqualified: new Set(),
+    voiceUsers: new Set(),
     finalizingBid: false,
     disconnectTimeouts: new Map(), // socketId -> timeout
   };
@@ -1313,25 +1320,40 @@ io.on("connection", (socket) => {
 
   socket.on("voice_join", ({ roomId, username }) => {
     if (!roomId) return;
+    const room = getRoom(roomId);
     socket.data.roomId = roomId;
     if (username) socket.data.username = username;
-    
+
+    // Track voice user
+    room.voiceUsers.add(socket.id);
+
     socket.join(roomId);
-    // Notify others in the room to initiate peer connections
+
+    // Notify others in the room
     socket.to(roomId).emit("user_joined_voice", { 
       socketId: socket.id, 
       username: username || socket.data.username || "Unknown" 
     });
+
+    // Send existing voice users to the new joiner
+    const existing = Array.from(room.voiceUsers)
+      .filter(id => id !== socket.id)
+      .map(id => ({ 
+        socketId: id, 
+        username: room.users.get(id)?.username || "Unknown" 
+      }));
+
+    socket.emit("voice_room_users", { users: existing });
   });
 
   socket.on("voice_signal", (payload) => {
+    if (!payload.to) return;
     io.to(payload.to).emit("voice_signal", {
       from: socket.id,
       fromUsername: socket.data.username || "Unknown",
       signal: payload.signal,
     });
   });
-
   socket.on("voice_toggle_mic", (payload) => {
     const roomId = socket.data.roomId;
     if (roomId) {
@@ -1555,7 +1577,11 @@ io.on("connection", (socket) => {
     const room = rooms.get(roomId);
     if (!room) return;
 
-    // Start a 10-minute (600,000 ms) grace period before removing the user
+    // Remove from voice status immediately
+    room.voiceUsers.delete(socket.id);
+    io.to(roomId).emit("user_left_voice", { socketId: socket.id });
+
+    // Start a 10-minute (600,000 ms) grace period before removing the user from room users
     const timeoutId = setTimeout(() => {
       if (room.users.has(socket.id)) {
         room.users.delete(socket.id);
