@@ -4,18 +4,25 @@ import socket from "../socket";
 export default function VoiceChat({ roomId, username }) {
     const [isJoined, setIsJoined] = useState(false);
     const [isMuted, setIsMuted] = useState(true);
-    const [peers, setPeers] = useState({}); // { socketId: { username, isMuted } }
+    const [peers, setPeers] = useState({}); // { socketId: { username, isMuted, status } }
     
     const localStreamRef = useRef(null);
     const peersRef = useRef({}); // { socketId: RTCPeerConnection }
-    const remoteStreamsRef = useRef({}); // { socketId: MediaStream }
+    const iceQueuesRef = useRef({}); // { socketId: [candidates] }
 
     const createPeerConnection = useCallback((targetSocketId, isInitiator, targetUsername) => {
-        // Updated ICE servers with TURN for cellular/cross-network NAT traversal
+        console.log(`Creating PeerConnection for ${targetUsername} (${targetSocketId}), isInitiator: ${isInitiator}`);
+        
+        // Comprehensive ICE servers for both internal and external NAT traversal
         const pc = new RTCPeerConnection({
             iceServers: [
                 { urls: "stun:stun.l.google.com:19302" },
                 { urls: "stun:stun1.l.google.com:19302" },
+                { urls: "stun:stun2.l.google.com:19302" },
+                { urls: "stun:stun3.l.google.com:19302" },
+                { urls: "stun:stun4.l.google.com:19302" },
+                { urls: "stun:stun.services.mozilla.com" },
+                { urls: "stun:stun.stunprotocol.org:3478" },
                 {
                     urls: "turn:openrelay.metered.ca:80",
                     username: "openrelayproject",
@@ -25,24 +32,35 @@ export default function VoiceChat({ roomId, username }) {
                     urls: "turn:openrelay.metered.ca:443",
                     username: "openrelayproject",
                     credential: "openrelayproject"
-                },
-                {
-                    urls: "turn:openrelay.metered.ca:443?transport=tcp",
-                    username: "openrelayproject",
-                    credential: "openrelayproject"
                 }
             ],
             iceCandidatePoolSize: 10,
         });
 
-        const iceQueue = [];
         peersRef.current[targetSocketId] = pc;
-        if (targetUsername) {
-            setPeers(prev => ({ ...prev, [targetSocketId]: { username: targetUsername, isMuted: true } }));
-        }
+        iceQueuesRef.current[targetSocketId] = [];
+
+        setPeers(prev => ({ 
+            ...prev, 
+            [targetSocketId]: { 
+                username: targetUsername || "Peer", 
+                isMuted: true, 
+                status: "init" 
+            } 
+        }));
+
+        pc.oniceconnectionstatechange = () => {
+            const state = pc.iceConnectionState;
+            console.log(`ICE Connection State with ${targetSocketId}: ${state}`);
+            setPeers(prev => prev[targetSocketId] ? {
+                ...prev,
+                [targetSocketId]: { ...prev[targetSocketId], status: state }
+            } : prev);
+        };
 
         pc.onicecandidate = (event) => {
             if (event.candidate) {
+                // console.log(`Sending ICE candidate to ${targetSocketId}`);
                 socket.emit("voice_signal", {
                     to: targetSocketId,
                     signal: { type: "candidate", candidate: event.candidate },
@@ -51,46 +69,38 @@ export default function VoiceChat({ roomId, username }) {
         };
 
         pc.ontrack = (event) => {
-            remoteStreamsRef.current[targetSocketId] = event.streams[0];
-            
-            // Remove existing audio if any
-            const existingAudio = document.getElementById(`audio-${targetSocketId}`);
-            if (existingAudio) existingAudio.remove();
-
-            const audio = document.createElement("audio");
+            console.log(`Received remote track from ${targetSocketId}`);
+            const stream = event.streams[0];
+            const audio = document.getElementById(`audio-${targetSocketId}`) || document.createElement("audio");
             audio.id = `audio-${targetSocketId}`;
-            audio.srcObject = event.streams[0];
-            
-            // Mobile browsers (esp Safari) require these attributes explicitly set
+            audio.srcObject = stream;
             audio.setAttribute("autoplay", "autoplay");
             audio.setAttribute("playsinline", "playsinline");
             audio.muted = false;
-            
-            document.body.appendChild(audio);
-            
-            // Explicitly play() to handle some mobile browser restrictions
-            try {
-                const playPromise = audio.play();
-                if (playPromise !== undefined) {
-                    playPromise.catch(error => {
-                        console.warn("Autoplay was prevented. User interaction might be required.", error);
-                    });
-                }
-            } catch (e) {
-                console.error("Audio playback failed", e);
+            if (!document.getElementById(`audio-${targetSocketId}`)) {
+                document.body.appendChild(audio);
             }
+            audio.play().catch(err => {
+                console.warn("Autoplay blocked - user interaction required", err);
+                // The "Fix Sound" button will handle this
+            });
         };
 
-        // Add local tracks to the connection
+        // Important: Add local tracks BEFORE creating offer
         if (localStreamRef.current) {
+            console.log("Adding local tracks to PC");
             localStreamRef.current.getTracks().forEach((track) => {
                 pc.addTrack(track, localStreamRef.current);
             });
         }
 
         if (isInitiator) {
+            console.log("Creating offer...");
             pc.createOffer({ offerToReceiveAudio: true })
-                .then((offer) => pc.setLocalDescription(offer))
+                .then((offer) => {
+                    console.log("Offer created, setting local description");
+                    return pc.setLocalDescription(offer);
+                })
                 .then(() => {
                     socket.emit("voice_signal", {
                         to: targetSocketId,
@@ -102,10 +112,13 @@ export default function VoiceChat({ roomId, username }) {
 
         // Helper to process queued candidates
         pc.processIceQueue = () => {
-            while (iceQueue.length > 0) {
-                const cand = iceQueue.shift();
-                pc.addIceCandidate(new RTCIceCandidate(cand))
-                  .catch(e => console.error("Error adding queued candidate", e));
+            const queue = iceQueuesRef.current[targetSocketId];
+            if (pc.remoteDescription && queue) {
+                while (queue.length > 0) {
+                    const cand = queue.shift();
+                    pc.addIceCandidate(new RTCIceCandidate(cand))
+                      .catch(e => console.error("Error adding queued candidate", e));
+                }
             }
         };
 
@@ -114,7 +127,8 @@ export default function VoiceChat({ roomId, username }) {
                 pc.addIceCandidate(new RTCIceCandidate(cand))
                   .catch(e => console.error("Error adding candidate", e));
             } else {
-                iceQueue.push(cand);
+                if (!iceQueuesRef.current[targetSocketId]) iceQueuesRef.current[targetSocketId] = [];
+                iceQueuesRef.current[targetSocketId].push(cand);
             }
         };
 
@@ -122,48 +136,27 @@ export default function VoiceChat({ roomId, username }) {
     }, []);
 
     const joinVoice = async () => {
-        // 1. Check if the context is secure (HTTPS or localhost)
         if (!window.isSecureContext) {
-            alert("Microphone access requires a secure connection (HTTPS). If you are testing locally on another device, please use localhost or an HTTPS tunnel like ngrok.");
+            alert("Secure context required (HTTPS).");
             return;
         }
 
-        // iOS Safari Audio Primer Hack
-        // Create and play a silent audio element immediately on user interaction
+        // Audio Primer for Safari
         try {
             const AudioContext = window.AudioContext || window.webkitAudioContext;
-            if (AudioContext) {
-                const audioCtx = new AudioContext();
-                const buffer = audioCtx.createBuffer(1, 1, 22050);
-                const source = audioCtx.createBufferSource();
-                source.buffer = buffer;
-                source.connect(audioCtx.destination);
-                source.start(0);
-                if (audioCtx.state === 'suspended') {
-                    audioCtx.resume();
-                }
-            }
-        } catch (e) {
-            console.warn("Audio context priming failed", e);
-        }
+            const audioCtx = new AudioContext();
+            audioCtx.resume();
+        } catch (e) {}
 
         try {
             const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
             localStreamRef.current = stream;
-            // Initially muted
             stream.getAudioTracks()[0].enabled = false;
             setIsJoined(true);
             setIsMuted(true);
-
-            // Using dedicated voice_join to avoid re-triggering join_room logic in Auction.jsx
             socket.emit("voice_join", { roomId, username });
         } catch (err) {
-            console.error("Failed to get local stream", err);
-            if (err.name === 'NotAllowedError') {
-                alert("Microphone permission was denied. Please allow microphone access in your browser settings.");
-            } else {
-                alert("Could not access microphone. Ensure no other app is using it and you are on a secure (HTTPS) connection.");
-            }
+            alert("Mic access failed. Check HTTPS/permissions.");
         }
     };
 
@@ -176,19 +169,36 @@ export default function VoiceChat({ roomId, username }) {
         }
     };
 
+    const fixSound = () => {
+        document.querySelectorAll('audio[id^="audio-"]').forEach(audio => {
+            audio.play().catch(e => console.error("Fix failed", e));
+        });
+        // Also resume AudioContext if any
+        try {
+            const AudioContext = window.AudioContext || window.webkitAudioContext;
+            const ctx = new AudioContext();
+            ctx.resume();
+        } catch (e) {}
+    };
+
     useEffect(() => {
         if (!isJoined) return;
 
+        socket.on("voice_room_users", ({ users }) => {
+            users.forEach(u => {
+                if (u.socketId !== socket.id) {
+                    createPeerConnection(u.socketId, true, u.username);
+                }
+            });
+        });
+
         socket.on("user_joined_voice", ({ socketId, username: peerName }) => {
             if (socketId === socket.id) return;
-            // When someone joins, initiate a peer connection with them
             createPeerConnection(socketId, true, peerName);
         });
 
         socket.on("voice_signal", async ({ from, fromUsername, signal }) => {
             let pc = peersRef.current[from];
-            
-            // If we get a signal from someone we don't know, create a connection (as receiver)
             if (!pc) {
                 pc = createPeerConnection(from, false, fromUsername);
             }
@@ -199,45 +209,37 @@ export default function VoiceChat({ roomId, username }) {
                     pc.processIceQueue();
                     const answer = await pc.createAnswer();
                     await pc.setLocalDescription(answer);
-                    socket.emit("voice_signal", {
-                        to: from,
-                        signal: { type: "answer", sdp: pc.localDescription },
-                    });
-                } catch (err) {
-                    console.error("Error handling offer", err);
+                    socket.emit("voice_signal", { to: from, signal: { type: "answer", sdp: pc.localDescription } });
+                } catch (e) {
+                    console.error("Error in offer:", e);
                 }
             } else if (signal.type === "answer") {
                 try {
                     await pc.setRemoteDescription(new RTCSessionDescription(signal.sdp));
                     pc.processIceQueue();
-                } catch (err) {
-                    console.error("Error handling answer", err);
+                } catch (e) {
+                    console.error("Error in answer:", e);
                 }
             } else if (signal.type === "candidate") {
-                if (signal.candidate) {
-                    pc.queueCandidate(signal.candidate);
-                }
+                pc.queueCandidate(signal.candidate);
             }
         });
 
         socket.on("voice_toggle_mic", ({ socketId, isMuted: peerMuted }) => {
-            setPeers(prev => {
-                if (!prev[socketId]) return prev;
-                return { ...prev, [socketId]: { ...prev[socketId], isMuted: peerMuted } };
-            });
+            setPeers(prev => prev[socketId] ? { ...prev, [socketId]: { ...prev[socketId], isMuted: peerMuted } } : prev);
         });
 
         socket.on("user_left_voice", ({ socketId }) => {
+            console.log("User left voice:", socketId);
             if (peersRef.current[socketId]) {
                 peersRef.current[socketId].close();
                 delete peersRef.current[socketId];
             }
-            if (remoteStreamsRef.current[socketId]) {
-                delete remoteStreamsRef.current[socketId];
+            if (iceQueuesRef.current[socketId]) {
+                delete iceQueuesRef.current[socketId];
             }
             const audio = document.getElementById(`audio-${socketId}`);
             if (audio) audio.remove();
-            
             setPeers(prev => {
                 const next = { ...prev };
                 delete next[socketId];
@@ -246,33 +248,22 @@ export default function VoiceChat({ roomId, username }) {
         });
 
         return () => {
-            socket.off("user_joined_voice");
-            socket.off("voice_signal");
-            socket.off("voice_toggle_mic");
-            socket.off("user_left_voice");
+            ["voice_room_users", "user_joined_voice", "voice_signal", "voice_toggle_mic", "user_left_voice"].forEach(ev => socket.off(ev));
         };
     }, [isJoined, createPeerConnection, roomId, username]);
 
-    // Cleanup on unmount
     useEffect(() => {
         return () => {
-            if (localStreamRef.current) {
-                localStreamRef.current.getTracks().forEach(track => track.stop());
-            }
+            if (localStreamRef.current) localStreamRef.current.getTracks().forEach(t => t.stop());
             Object.values(peersRef.current).forEach(pc => pc.close());
-            // Remove all audio elements
-            const audios = document.querySelectorAll('audio[id^="audio-"]');
-            audios.forEach(a => a.remove());
+            document.querySelectorAll('audio[id^="audio-"]').forEach(a => a.remove());
         };
     }, []);
 
     if (!isJoined) {
         return (
             <div className="fixed bottom-6 right-6 z-50">
-                <button 
-                    onClick={joinVoice}
-                    className="flex items-center gap-3 bg-accent/20 hover:bg-accent/40 border border-accent/30 text-accent px-6 py-3 rounded-2xl backdrop-blur-md transition-all group shadow-xl hover:shadow-accent/20"
-                >
+                <button onClick={joinVoice} className="flex items-center gap-3 bg-accent/20 hover:bg-accent/40 border border-accent/30 text-accent px-6 py-3 rounded-2xl backdrop-blur-md transition-all group shadow-xl">
                     <div className="w-2 h-2 rounded-full bg-accent animate-pulse"></div>
                     <span className="text-xs font-black uppercase tracking-widest italic">Join Voice War Room</span>
                 </button>
@@ -282,24 +273,32 @@ export default function VoiceChat({ roomId, username }) {
 
     return (
         <div className="fixed bottom-6 right-6 z-50 flex flex-col items-end gap-4">
-            {/* Peers List */}
+            {/* Connection Status & Peer List */}
             <div className="flex flex-col gap-2 pointer-events-none">
                 {Object.entries(peers).map(([id, peer]) => (
-                    <div key={id} className="flex items-center gap-3 bg-white/5 border border-white/5 px-4 py-2 rounded-xl backdrop-blur-md animate-slide-up shadow-lg">
+                    <div key={id} className="flex items-center gap-3 bg-night/80 border border-white/5 px-4 py-2 rounded-xl backdrop-blur-md shadow-lg">
                         <div className={`w-2 h-2 rounded-full ${peer.isMuted ? "bg-slate-500" : "bg-emerald-500 animate-pulse"}`}></div>
-                        <span className="text-[10px] font-black uppercase tracking-widest text-white italic">{peer.username}</span>
+                        <div className="flex flex-col">
+                            <span className="text-[10px] font-black uppercase tracking-widest text-white italic leading-tight">{peer.username}</span>
+                            <span className={`text-[7px] font-bold uppercase tracking-widest ${peer.status === "connected" || peer.status === "completed" ? "text-emerald-500" : "text-amber-500"}`}>
+                                {peer.status || "Init"}
+                            </span>
+                        </div>
                     </div>
                 ))}
             </div>
 
             {/* Local Controls */}
-            <div className="flex items-center gap-3 bg-night/90 border border-white/10 p-2 rounded-2xl backdrop-blur-xl shadow-2xl border-b-accent/30">
-                <div className="px-4 py-2">
-                    <div className="flex items-center gap-3">
+            <div className="flex items-center gap-3 bg-night/95 border border-white/10 p-2 rounded-2xl backdrop-blur-xl shadow-2xl border-b-accent/40">
+                <button onClick={fixSound} className="p-3 bg-white/5 hover:bg-white/10 text-white rounded-xl transition-all group relative" title="Click if you can't hear others">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M11 5L6 9H2v6h4l5 4V5z"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>
+                    <span className="absolute -top-8 right-0 bg-accent text-night text-[8px] font-black px-2 py-1 rounded opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap">FIX SOUND</span>
+                </button>
+                <div className="h-6 w-px bg-white/10"></div>
+                <div className="px-3 py-1">
+                    <div className="flex items-center gap-2">
                         <div className={`w-2 h-2 rounded-full ${isMuted ? "bg-rose-500" : "bg-emerald-500 animate-pulse"}`}></div>
-                        <span className="text-[10px] font-black uppercase tracking-widest text-slate-400 italic">
-                            {username?.split(' ')[0] || "YOU"}
-                        </span>
+                        <span className="text-[10px] font-black uppercase tracking-widest text-slate-400 italic">YOU</span>
                     </div>
                 </div>
                 <button 
