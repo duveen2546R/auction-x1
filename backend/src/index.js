@@ -119,7 +119,7 @@ function createRoom(roomId) {
 
 function activeSockets(room) {
   const connectedSockets = io.sockets.adapter.rooms.get(room.roomId);
-  return Array.from(room.users.keys()).filter((id) => 
+  return Array.from(room.users.keys()).filter((id) =>
     !room.blockedUsers.has(id) && connectedSockets?.has(id)
   );
 }
@@ -340,7 +340,7 @@ async function getRoomPursesSnapshot(roomDbId) {
 function broadcastPlayers(roomId) {
   const room = rooms.get(roomId);
   if (!room) return;
-  
+
   // Filter out spectators (blocked users) from the public franchise list
   const players = Array.from(room.users.entries())
     .filter(([socketId]) => !room.blockedUsers.has(socketId))
@@ -348,7 +348,7 @@ function broadcastPlayers(roomId) {
       username: u.username,
       team: u.teamName || null,
     }));
-    
+
   io.to(roomId).emit("players_update", players);
 }
 
@@ -365,10 +365,10 @@ function startTimer(roomId) {
     const totalDuration = room.totalDuration || 13000;
     const remainingMs = Math.max(0, totalDuration - idleMs);
 
-    io.to(roomId).emit("timer_tick", { 
-      remainingMs, 
+    io.to(roomId).emit("timer_tick", {
+      remainingMs,
       totalMs: totalDuration,
-      percent: (remainingMs / totalDuration) * 100 
+      percent: (remainingMs / totalDuration) * 100
     });
 
     if (!room.warnedOnce && remainingMs <= 5000) {
@@ -397,7 +397,7 @@ function maybeAutoResolve(roomId) {
 
   // If every active player has either passed, is currently the high bidder, or voted to skip,
   // no more bidding is possible. Finalize immediately.
-  const noMoreBidsPossible = activeIds.every(id => 
+  const noMoreBidsPossible = activeIds.every(id =>
     id === room.highestBidder || room.passedUsers.has(id) || room.skipPoolUsers.has(id)
   );
 
@@ -512,7 +512,7 @@ async function startNextPlayer(roomId) {
     clearInterval(room.timer);
     room.timer = null;
   }
-  
+
   // Set status to pending while finding next player
   room.status = "transitioning";
   await persistAuctionState(roomId);
@@ -580,11 +580,11 @@ async function startNextPlayer(roomId) {
 
       io.to(roomId).emit("new_player", player);
       io.to(roomId).emit("bid_update", { amount: room.currentBid, by: null, history: room.bidHistory || [] });
-      
+
       // Reset skip votes only on a NEW set
       room.skipPoolUsers = new Set();
-      io.to(roomId).emit("skip_update", { 
-        count: 0, 
+      io.to(roomId).emit("skip_update", {
+        count: 0,
         total: activeSockets(room).length,
         setName: player.setName
       });
@@ -618,10 +618,10 @@ async function startNextPlayer(roomId) {
 
   io.to(roomId).emit("new_player", player);
   io.to(roomId).emit("bid_update", { amount: room.currentBid, by: null, history: room.bidHistory || [] });
-  
+
   // Do NOT reset skipPoolUsers here if it's the same set
-  io.to(roomId).emit("skip_update", { 
-    count: room.skipPoolUsers.size, 
+  io.to(roomId).emit("skip_update", {
+    count: room.skipPoolUsers.size,
     total: activeSockets(room).length,
     setName: player.setName
   });
@@ -673,7 +673,7 @@ async function skipPool(roomId) {
 
   room.idx = nextPoolIdx;
   room.skipPoolUsers = new Set();
-  
+
   if (room.timer) {
     clearInterval(room.timer);
     room.timer = null;
@@ -704,7 +704,7 @@ async function finalizeBid(roomId) {
   try {
     if (winnerUserId || liveWinner) {
       let currentBudget = Number(liveWinner?.budget ?? 120);
-      
+
       // If we have a DB ID, always double check the budget from DB to be safe
       if (room.dbId && winnerUserId) {
         try {
@@ -815,7 +815,7 @@ async function finalizeBid(roomId) {
     }
   } finally {
     room.finalizingBid = false;
-    
+
     // Check if the pool skip was unanimous
     const active = activeSockets(room);
     if (active.length > 0 && room.skipPoolUsers.size >= active.length) {
@@ -858,7 +858,7 @@ function endAuction(roomId) {
   userEntries.forEach(([sid, user]) => {
     const roster = user.team || [];
     const total = roster.length;
-    
+
     let bats = 0, bowls = 0, wks = 0, ars = 0, overseas = 0;
     roster.forEach((p) => {
       const role = (p.role || "").toLowerCase();
@@ -867,7 +867,7 @@ function endAuction(roomId) {
       const isBowl = role.includes("bowl") || role.includes("pace") || role.includes("spin");
       const isWk = role.includes("keep") || role.includes("wk");
       const isOs = (p.country || "").toLowerCase() !== "india";
-      
+
       if (isOs) overseas += 1;
       if (isAr) {
         ars += 1;
@@ -908,7 +908,7 @@ function endAuction(roomId) {
 function buildAutoLineup(team, partialPicks = []) {
   const lineup = [];
   const owned = new Map(team.map(p => [p.id, p]));
-  
+
   const byScore = (arr) =>
     arr.slice().sort((a, b) => (Number(b.batting_rating ?? b.rating ?? 0) + Number(b.bowling_rating ?? b.rating ?? 0)) -
       (Number(a.batting_rating ?? a.rating ?? 0) + Number(a.bowling_rating ?? a.rating ?? 0)));
@@ -924,7 +924,7 @@ function buildAutoLineup(team, partialPicks = []) {
   };
 
   const overseas = (p) => (p.country || "").toLowerCase() !== "india";
-  
+
   const pushWithCap = (p) => {
     if (lineup.find(x => x.id === p.id)) return false;
     if (lineup.length >= 11) return false;
@@ -1014,7 +1014,7 @@ function buildAutoLineup(team, partialPicks = []) {
 async function autoFinalizePlaying11(roomId) {
   const room = rooms.get(roomId);
   if (!room || room.status !== "picking") return;
-  
+
   // Only process currently CONNECTED (active) users
   const activeIds = activeSockets(room);
   const disqualified = room.disqualified || new Set();
@@ -1022,7 +1022,7 @@ async function autoFinalizePlaying11(roomId) {
   for (const sid of activeIds) {
     if (disqualified.has(sid)) continue;
     if (room.playing11.has(sid)) continue;
-    
+
     const user = room.users.get(sid);
     if (!user) continue;
 
@@ -1045,11 +1045,11 @@ async function autoFinalizePlaying11(roomId) {
   }
 
   room.disqualified = disqualified;
-  
+
   const results = Array.from(room.playing11.values()).sort((a, b) => b.score - a.score);
   const winnerName = results[0]?.teamName || results[0]?.username || "No winner";
   const dqNames = Array.from(disqualified).map((sid) => room.users.get(sid)?.teamName || room.users.get(sid)?.username).filter(Boolean);
-  
+
   io.to(roomId).emit("playing11_results", { winner: winnerName, results, disqualified: dqNames });
   room.status = "finished_finalized";
 }
@@ -1068,10 +1068,10 @@ function handleBid(socket, amount) {
   const numericBid = Math.round(Number(amount) * 100) / 100;
   const currentBidRounded = Math.round(room.currentBid * 100) / 100;
   const step = currentBidRounded < 10 ? 0.2 : 0.5;
-  
+
   // If no one has bid yet, allow bidding the base price (room.currentBid)
   const minRequired = room.highestBidder ? (currentBidRounded + step) : currentBidRounded;
-  
+
   if (Number.isNaN(numericBid) || numericBid < minRequired - 1e-9) return;
 
   const user = room.users.get(socket.id);
@@ -1087,7 +1087,7 @@ function handleBid(socket, amount) {
   // Cap at 15 seconds to prevent excessive timer growth
   const newRemainingMs = Math.min(15000, remainingMs + 5000);
   room.totalDuration = newRemainingMs;
-  
+
   const bidderName = user?.teamName || socket.data.username;
   room.currentBid = numericBid;
   room.highestBidder = socket.id;
@@ -1109,14 +1109,14 @@ function handleBid(socket, amount) {
     history: room.bidHistory.slice(-10),
     step: room.currentBid < 10 ? 0.2 : 0.5,
   });
-  
+
   // Broadcast update to maintain 'total' sockets but keep the skip count
-  io.to(roomId).emit("skip_update", { 
-    count: room.skipPoolUsers.size, 
+  io.to(roomId).emit("skip_update", {
+    count: room.skipPoolUsers.size,
     total: activeSockets(room).length,
     setName: room.currentPlayer?.setName
   });
-  
+
   maybeAutoResolve(roomId);
   persistAuctionState(roomId);
 
@@ -1204,7 +1204,7 @@ io.on("connection", (socket) => {
     }
 
     const room = getRoom(roomId, roomDbId);
-    
+
     // Attempt state recovery if room is fresh
     if (room.idx === 0 && room.status === "waiting") {
       try {
@@ -1272,7 +1272,7 @@ io.on("connection", (socket) => {
     // 3. The auction hasn't started yet
     const isReturningUser = !!existingUser || persistedTeam.length > 0;
     const isSpectator = !isReturningUser && room.status !== "waiting";
-    
+
     if (isSpectator) {
       room.blockedUsers.add(socket.id);
       console.log(`User ${cleanName} joined room ${roomId} as a spectator`);
@@ -1330,17 +1330,17 @@ io.on("connection", (socket) => {
     socket.join(roomId);
 
     // Notify others in the room
-    socket.to(roomId).emit("user_joined_voice", { 
-      socketId: socket.id, 
-      username: username || socket.data.username || "Unknown" 
+    socket.to(roomId).emit("user_joined_voice", {
+      socketId: socket.id,
+      username: username || socket.data.username || "Unknown"
     });
 
     // Send existing voice users to the new joiner
     const existing = Array.from(room.voiceUsers)
       .filter(id => id !== socket.id)
-      .map(id => ({ 
-        socketId: id, 
-        username: room.users.get(id)?.username || "Unknown" 
+      .map(id => ({
+        socketId: id,
+        username: room.users.get(id)?.username || "Unknown"
       }));
 
     socket.emit("voice_room_users", { users: existing });
@@ -1369,7 +1369,7 @@ io.on("connection", (socket) => {
     if (!resolvedRoom) return;
     const room = getRoom(resolvedRoom);
     if (room.status === "running") return;
-    
+
     // Clear previous room data if it has a DB ID
     if (room.dbId) {
       try {
@@ -1379,7 +1379,7 @@ io.on("connection", (socket) => {
         // Also reset budgets for room_players to default
         const [teams] = await pool.query("SELECT id, budget FROM teams");
         const budgetMap = new Map(teams.map(t => [t.id, t.budget]));
-        
+
         const [rps] = await pool.query("SELECT id, team_id FROM room_players WHERE room_id = ?", [room.dbId]);
         for (const rp of rps) {
           const budget = rp.team_id ? budgetMap.get(rp.team_id) || 120 : 120;
@@ -1390,7 +1390,7 @@ io.on("connection", (socket) => {
         console.error("Failed to clear previous room data", err.message);
       }
     }
-    
+
     // Reset room state for a fresh auction
     room.idx = 0;
     room.playersQueue = organizePlayersIntoSets(playersMaster);
@@ -1420,9 +1420,9 @@ io.on("connection", (socket) => {
 
     room.skipPoolUsers.add(socket.id);
     const active = activeSockets(room);
-    
-    io.to(roomId).emit("skip_update", { 
-      count: room.skipPoolUsers.size, 
+
+    io.to(roomId).emit("skip_update", {
+      count: room.skipPoolUsers.size,
       total: active.length,
       setName: room.currentPlayer?.setName
     });
@@ -1435,7 +1435,7 @@ io.on("connection", (socket) => {
       note: "skip vote (pass)",
     });
     io.to(roomId).emit("bid_update", { amount: room.currentBid, by: room.highestBidderName, history: room.bidHistory.slice(-10) });
-    
+
     // Check if everyone has either passed or voted to skip
     maybeAutoResolve(roomId);
   });
@@ -1444,7 +1444,7 @@ io.on("connection", (socket) => {
     const roomId = socket.data.roomId;
     const room = rooms.get(roomId);
     if (!room) return;
-    
+
     room.blockedUsers.add(socket.id);
     room.withdrawnUsers.add(socket.id);
 
@@ -1529,14 +1529,14 @@ io.on("connection", (socket) => {
     const roomId = socket.data.roomId;
     const room = rooms.get(roomId);
     if (!room) return;
-    
+
     // Check if 3 minutes (180,000 ms) have passed since selection started
     const waitPeriod = 3 * 60 * 1000;
     const elapsed = Date.now() - (room.selectionStartTime || 0);
     if (elapsed < waitPeriod) {
       const remainingWait = Math.ceil((waitPeriod - elapsed) / 1000);
-      socket.emit("playing11_error", { 
-        reason: `Please wait ${remainingWait}s more to finalize your squad. Use this time to strategize!` 
+      socket.emit("playing11_error", {
+        reason: `Please wait ${remainingWait}s more to finalize your squad. Use this time to strategize!`
       });
       return;
     }
@@ -1592,7 +1592,7 @@ io.on("connection", (socket) => {
     }, 600000); // 10 minutes
 
     room.disconnectTimeouts.set(socket.id, timeoutId);
-    
+
     io.to(roomId).emit("user_left_voice", { socketId: socket.id });
   });
 });
