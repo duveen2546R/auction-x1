@@ -135,6 +135,13 @@ export default function Result() {
 
     const validation = useMemo(() => validateLineup(team, selected), [team, selected]);
 
+    // Sync current selection with server for auto-submission backup
+    useEffect(() => {
+        if (selected.length > 0) {
+            socket.emit("sync_lineup", { playerIds: selected });
+        }
+    }, [selected]);
+
     const toggle = (id) => {
         if (selected.includes(id)) {
             setSelected(selected.filter((x) => x !== id));
@@ -188,9 +195,13 @@ export default function Result() {
 
                     <div className="flex items-center gap-8">
                         {remaining !== null && (
-                            <div className="flex flex-col items-end">
-                                <span className="text-[10px] text-slate-500 font-bold uppercase tracking-widest mb-1">Submission Deadline</span>
-                                <span className="text-lg font-black text-rose-500 italic">{remaining}s <span className="text-xs text-slate-500 font-medium tracking-normal not-italic">REMAINING</span></span>
+                            <div className={`flex flex-col items-end transition-all duration-300 ${remaining <= 20 ? "scale-110" : ""}`}>
+                                <span className={`text-[10px] font-bold uppercase tracking-widest mb-1 ${remaining <= 20 ? "text-rose-500 animate-pulse" : "text-slate-500"}`}>
+                                    {remaining <= 20 ? "URGENT: LOCK IN NOW" : "Submission Deadline"}
+                                </span>
+                                <span className={`text-lg font-black italic tabular-nums ${remaining <= 20 ? "text-rose-500 scale-110 drop-shadow-[0_0_10px_rgba(244,63,94,0.5)]" : "text-rose-500"}`}>
+                                    {remaining}s <span className="text-xs text-slate-500 font-medium tracking-normal not-italic">REMAINING</span>
+                                </span>
                             </div>
                         )}
                         <div className="h-10 w-px bg-white/10 hidden md:block"></div>
