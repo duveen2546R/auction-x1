@@ -11,19 +11,31 @@ export default function VoiceChat({ roomId, username }) {
     const remoteStreamsRef = useRef({}); // { socketId: MediaStream }
 
     const createPeerConnection = useCallback((targetSocketId, isInitiator, targetUsername) => {
-        // Updated ICE servers with more redundancy
+        // Updated ICE servers with TURN for cellular/cross-network NAT traversal
         const pc = new RTCPeerConnection({
             iceServers: [
                 { urls: "stun:stun.l.google.com:19302" },
                 { urls: "stun:stun1.l.google.com:19302" },
-                { urls: "stun:stun2.l.google.com:19302" },
-                { urls: "stun:stun3.l.google.com:19302" },
-                { urls: "stun:stun4.l.google.com:19302" },
-                { urls: "stun:stun.services.mozilla.com" },
+                {
+                    urls: "turn:openrelay.metered.ca:80",
+                    username: "openrelayproject",
+                    credential: "openrelayproject"
+                },
+                {
+                    urls: "turn:openrelay.metered.ca:443",
+                    username: "openrelayproject",
+                    credential: "openrelayproject"
+                },
+                {
+                    urls: "turn:openrelay.metered.ca:443?transport=tcp",
+                    username: "openrelayproject",
+                    credential: "openrelayproject"
+                }
             ],
             iceCandidatePoolSize: 10,
         });
 
+        const iceQueue = [];
         peersRef.current[targetSocketId] = pc;
         if (targetUsername) {
             setPeers(prev => ({ ...prev, [targetSocketId]: { username: targetUsername, isMuted: true } }));
@@ -48,19 +60,24 @@ export default function VoiceChat({ roomId, username }) {
             const audio = document.createElement("audio");
             audio.id = `audio-${targetSocketId}`;
             audio.srcObject = event.streams[0];
-            audio.autoplay = true;
-            // Mobile browsers often require these properties and explicit play()
-            audio.playsInline = true;
-            audio.muted = false; // Ensure it's not muted
+            
+            // Mobile browsers (esp Safari) require these attributes explicitly set
+            audio.setAttribute("autoplay", "autoplay");
+            audio.setAttribute("playsinline", "playsinline");
+            audio.muted = false;
             
             document.body.appendChild(audio);
             
             // Explicitly play() to handle some mobile browser restrictions
-            const playPromise = audio.play();
-            if (playPromise !== undefined) {
-                playPromise.catch(error => {
-                    console.warn("Autoplay was prevented. User interaction might be required.", error);
-                });
+            try {
+                const playPromise = audio.play();
+                if (playPromise !== undefined) {
+                    playPromise.catch(error => {
+                        console.warn("Autoplay was prevented. User interaction might be required.", error);
+                    });
+                }
+            } catch (e) {
+                console.error("Audio playback failed", e);
             }
         };
 
@@ -83,6 +100,24 @@ export default function VoiceChat({ roomId, username }) {
                 .catch(err => console.error("Error creating offer", err));
         }
 
+        // Helper to process queued candidates
+        pc.processIceQueue = () => {
+            while (iceQueue.length > 0) {
+                const cand = iceQueue.shift();
+                pc.addIceCandidate(new RTCIceCandidate(cand))
+                  .catch(e => console.error("Error adding queued candidate", e));
+            }
+        };
+
+        pc.queueCandidate = (cand) => {
+            if (pc.remoteDescription && pc.remoteDescription.type) {
+                pc.addIceCandidate(new RTCIceCandidate(cand))
+                  .catch(e => console.error("Error adding candidate", e));
+            } else {
+                iceQueue.push(cand);
+            }
+        };
+
         return pc;
     }, []);
 
@@ -91,6 +126,25 @@ export default function VoiceChat({ roomId, username }) {
         if (!window.isSecureContext) {
             alert("Microphone access requires a secure connection (HTTPS). If you are testing locally on another device, please use localhost or an HTTPS tunnel like ngrok.");
             return;
+        }
+
+        // iOS Safari Audio Primer Hack
+        // Create and play a silent audio element immediately on user interaction
+        try {
+            const AudioContext = window.AudioContext || window.webkitAudioContext;
+            if (AudioContext) {
+                const audioCtx = new AudioContext();
+                const buffer = audioCtx.createBuffer(1, 1, 22050);
+                const source = audioCtx.createBufferSource();
+                source.buffer = buffer;
+                source.connect(audioCtx.destination);
+                source.start(0);
+                if (audioCtx.state === 'suspended') {
+                    audioCtx.resume();
+                }
+            }
+        } catch (e) {
+            console.warn("Audio context priming failed", e);
         }
 
         try {
@@ -142,6 +196,7 @@ export default function VoiceChat({ roomId, username }) {
             if (signal.type === "offer") {
                 try {
                     await pc.setRemoteDescription(new RTCSessionDescription(signal.sdp));
+                    pc.processIceQueue();
                     const answer = await pc.createAnswer();
                     await pc.setLocalDescription(answer);
                     socket.emit("voice_signal", {
@@ -154,16 +209,13 @@ export default function VoiceChat({ roomId, username }) {
             } else if (signal.type === "answer") {
                 try {
                     await pc.setRemoteDescription(new RTCSessionDescription(signal.sdp));
+                    pc.processIceQueue();
                 } catch (err) {
                     console.error("Error handling answer", err);
                 }
             } else if (signal.type === "candidate") {
-                try {
-                    if (signal.candidate) {
-                        await pc.addIceCandidate(new RTCIceCandidate(signal.candidate));
-                    }
-                } catch (e) {
-                    console.error("Error adding ice candidate", e);
+                if (signal.candidate) {
+                    pc.queueCandidate(signal.candidate);
                 }
             }
         });
