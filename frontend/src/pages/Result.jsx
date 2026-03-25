@@ -164,6 +164,32 @@ export default function Result() {
         socket.emit("submit_playing11", { playerIds: selected });
     };
 
+    const downloadResults = () => {
+        if (!results) return;
+        let content = "AUCTION RESULTS - FINAL PLAYING XI\n";
+        content += "=".repeat(40) + "\n\n";
+        
+        results.forEach((r, idx) => {
+            const teamDisplay = r.teamName || r.username;
+            content += `${idx + 1}. ${teamDisplay.toUpperCase()}\n`;
+            content += `Score: ${r.score.toFixed(1)}\n`;
+            if (r.playerNames && Array.isArray(r.playerNames)) {
+                content += `Players: ${r.playerNames.join(", ")}\n`;
+            }
+            content += "-".repeat(40) + "\n\n";
+        });
+
+        const blob = new Blob([content], { type: "text/plain" });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = `auction_results_${new Date().getTime()}.txt`;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(url);
+    };
+
     return (
         <div
             className="min-h-screen text-slate-100 px-4 py-8"
@@ -193,7 +219,17 @@ export default function Result() {
                         </div>
                     </div>
 
-                    <div className="flex items-center gap-8">
+                    <div className="flex items-center gap-4">
+                        {results && (
+                            <button 
+                                onClick={downloadResults}
+                                className="flex items-center gap-2 px-4 py-2 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-500 border border-emerald-500/30 rounded-lg text-xs font-black uppercase tracking-widest transition-all"
+                            >
+                                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                                Export Results
+                            </button>
+                        )}
+                        <div className="h-10 w-px bg-white/10 hidden md:block"></div>
                         {remaining !== null && (
                             <div className={`flex flex-col items-end transition-all duration-300 ${remaining <= 20 ? "scale-110" : ""}`}>
                                 <span className={`text-[10px] font-bold uppercase tracking-widest mb-1 ${remaining <= 20 ? "text-rose-500 animate-pulse" : "text-slate-500"}`}>

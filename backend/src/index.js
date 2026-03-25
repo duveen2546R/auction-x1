@@ -467,6 +467,7 @@ function evaluatePlaying11(room, socketId, playerIds) {
     ok: true,
     score,
     breakdown: { battingTotal, bowlingTotal, balanceBonus, bats, bowls, wks, ars },
+    playerNames: lineup.map((p) => p.name),
   };
 }
 
@@ -751,6 +752,12 @@ async function finalizeBid(roomId) {
               nextBudget = Number(budgetRows[0].budget);
             }
           } else {
+            // Persist the winning bid for record-keeping
+            await pool.query(
+              "INSERT INTO bids (room_id, player_id, user_id, bid_amount) VALUES (?, ?, ?, ?)",
+              [room.dbId, soldPlayer.id, winnerUserId, soldPrice]
+            ).catch(err => console.warn("Failed to log final winning bid", err.message));
+
             await pool.query(
               "INSERT INTO team_players (room_id, user_id, player_id, price) VALUES (?, ?, ?, ?)",
               [room.dbId, winnerUserId, soldPlayer.id, soldPrice]
@@ -1118,17 +1125,28 @@ function handleBid(socket, amount) {
   });
 
   maybeAutoResolve(roomId);
-  persistAuctionState(roomId);
-
-  if (room.dbId && user?.userId && room.currentPlayer?.id) {
-    pool
-      .query(
-        "INSERT INTO bids (room_id, player_id, user_id, bid_amount) VALUES (?, ?, ?, ?)",
-        [room.dbId, room.currentPlayer.id, user.userId, numericBid]
-      )
-      .catch((err) => console.error("Failed to persist bid", err.message));
+  
+  // SMART SAVE: Persist to DB at most once every 7 seconds during active bidding
+  // to ensure recovery is possible without crashing the server.
+  const now = Date.now();
+  if (!room.lastDbPersist || (now - room.lastDbPersist > 7000)) {
+    room.lastDbPersist = now;
+    persistAuctionState(roomId);
   }
 }
+
+// Room Cleanup Mechanism: Remove rooms inactive for more than 2 hours
+setInterval(() => {
+  const now = Date.now();
+  for (const [roomId, room] of rooms.entries()) {
+    // If room is empty and has been inactive for 2 hours, delete it
+    if (room.users.size === 0 && (now - room.lastBidAt > 7200000)) {
+      console.log(`Cleaning up inactive room: ${roomId}`);
+      if (room.timer) clearInterval(room.timer);
+      rooms.delete(roomId);
+    }
+  }
+}, 3600000); // Run once per hour
 
 io.on("connection", (socket) => {
   socket.on("join_room", async ({ roomId, username, teamName }) => {
@@ -1552,7 +1570,13 @@ io.on("connection", (socket) => {
       socket.emit("playing11_error", { reason: evalResult.reason });
       return;
     }
-    room.playing11.set(socket.id, { ...evalResult, playerIds: ids, username: socket.data.username });
+    const user = room.users.get(socket.id);
+    room.playing11.set(socket.id, { 
+      ...evalResult, 
+      playerIds: ids, 
+      username: socket.data.username, 
+      teamName: user?.teamName || null 
+    });
 
     if (room.dbId && room.users.get(socket.id)?.userId) {
       const uid = room.users.get(socket.id).userId;
