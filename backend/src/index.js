@@ -386,26 +386,22 @@ function startTimer(roomId) {
   }, 1000);
 }
 
-function maybeAutoResolve(roomId) {
+function maybeAutoResolve(roomId, isManualAction = false) {
   const room = rooms.get(roomId);
   if (!room || !room.currentPlayer || room.status !== "running") return;
 
-  // SAFETY LOCK: Don't auto-resolve within the first 3 seconds of a player appearing
-  // to prevent "sudden skipping" before players can react.
+  // SAFETY LOCK: Don't auto-resolve within the first 3 seconds UNLESS it was a manual button press.
+  // This prevents "sudden skipping" on player load while keeping buttons responsive.
   const timeSinceStart = Date.now() - (room.lastBidAt || 0);
-  if (timeSinceStart < 3000) return;
+  if (!isManualAction && timeSinceStart < 3000) return;
 
   const activeIds = activeSockets(room);
-  if (activeIds.length === 0) {
-    // Optimization: Don't end auction immediately on 0 sockets; wait for disconnect timeout logic
-    return;
-  }
+  if (activeIds.length === 0) return;
 
-  // If every active player has either passed or is currently the high bidder,
-  // no more bidding is possible. Finalize immediately.
-  // Note: skipPoolUsers is removed from here to prevent carry-over skips.
+  // If every active player has either passed, voted to skip the pool, or is the high bidder,
+  // then no more bidding is possible. Finalize immediately.
   const noMoreBidsPossible = activeIds.every(id =>
-    id === room.highestBidder || room.passedUsers.has(id)
+    id === room.highestBidder || room.passedUsers.has(id) || room.skipPoolUsers.has(id)
   );
 
   if (noMoreBidsPossible) {
