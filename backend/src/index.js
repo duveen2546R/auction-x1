@@ -388,17 +388,24 @@ function startTimer(roomId) {
 
 function maybeAutoResolve(roomId) {
   const room = rooms.get(roomId);
-  if (!room || !room.currentPlayer) return;
+  if (!room || !room.currentPlayer || room.status !== "running") return;
+
+  // SAFETY LOCK: Don't auto-resolve within the first 3 seconds of a player appearing
+  // to prevent "sudden skipping" before players can react.
+  const timeSinceStart = Date.now() - (room.lastBidAt || 0);
+  if (timeSinceStart < 3000) return;
+
   const activeIds = activeSockets(room);
   if (activeIds.length === 0) {
-    endAuction(roomId);
+    // Optimization: Don't end auction immediately on 0 sockets; wait for disconnect timeout logic
     return;
   }
 
-  // If every active player has either passed, is currently the high bidder, or voted to skip,
+  // If every active player has either passed or is currently the high bidder,
   // no more bidding is possible. Finalize immediately.
+  // Note: skipPoolUsers is removed from here to prevent carry-over skips.
   const noMoreBidsPossible = activeIds.every(id =>
-    id === room.highestBidder || room.passedUsers.has(id) || room.skipPoolUsers.has(id)
+    id === room.highestBidder || room.passedUsers.has(id)
   );
 
   if (noMoreBidsPossible) {
@@ -1394,6 +1401,8 @@ io.on("connection", (socket) => {
         await pool.query("DELETE FROM team_players WHERE room_id = ?", [room.dbId]);
         await pool.query("DELETE FROM unsold_players WHERE room_id = ?", [room.dbId]);
         await pool.query("DELETE FROM bids WHERE room_id = ?", [room.dbId]);
+        await pool.query("DELETE FROM auction_state WHERE room_id = ?", [room.dbId]);
+        
         // Also reset budgets for room_players to default
         const [teams] = await pool.query("SELECT id, budget FROM teams");
         const budgetMap = new Map(teams.map(t => [t.id, t.budget]));
@@ -1423,10 +1432,15 @@ io.on("connection", (socket) => {
     room.highestBidderUserId = null;
     room.highestBidderName = null;
     room.finalizingBid = false;
+    room.status = "waiting";
 
     io.to(resolvedRoom).emit("start_auction");
-    // Increased to 3 seconds to ensure all users have time to navigate and join
-    setTimeout(() => startNextPlayer(resolvedRoom), 3000);
+    // Increased to 5 seconds to ensure all users have time to navigate and join
+    // and to ensure DB deletes have finished.
+    setTimeout(() => {
+      console.log(`Starting first player for room ${resolvedRoom}`);
+      startNextPlayer(resolvedRoom);
+    }, 5000);
   });
 
   socket.on("place_bid", (amount) => handleBid(socket, amount));
@@ -1450,7 +1464,7 @@ io.on("connection", (socket) => {
       amount: room.currentBid,
       by: socket.data.username,
       ts: Date.now(),
-      note: "skip vote (pass)",
+      note: "skip pool vote",
     });
     io.to(roomId).emit("bid_update", { amount: room.currentBid, by: room.highestBidderName, history: room.bidHistory.slice(-10) });
 
