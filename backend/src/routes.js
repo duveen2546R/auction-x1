@@ -438,6 +438,7 @@ router.get("/user/history", requireAuth, async (req, res) => {
     }
 
     const history = rooms.map((room) => {
+      const canOpen = isRuntimeRoomOpenable(room.roomCode, room.id);
       const leaderboard = (leaderboardByRoom.get(Number(room.id)) || []).map((entry, index) => ({
         rank: index + 1,
         userId: entry.userId,
@@ -450,17 +451,24 @@ router.get("/user/history", requireAuth, async (req, res) => {
         (entry) => Number(entry.userId) === Number(req.auth.userId)
       );
 
+      const effectiveStatus =
+        room.status === "finished" ? "finished" : canOpen ? room.status : "closed";
+      const winnerName =
+        leaderboard[0]?.teamName ||
+        leaderboard[0]?.username ||
+        (effectiveStatus === "finished" || effectiveStatus === "closed" ? "No Result" : null);
+
       return {
         roomId: Number(room.id),
         roomCode: room.roomCode,
         sessionNumber: Number(room.sessionNumber || 1),
-        status: room.status,
+        status: effectiveStatus,
         createdAt: room.createdAt,
         teamName: room.teamName,
-        winnerName: leaderboard[0]?.teamName || leaderboard[0]?.username || null,
+        winnerName,
         yourScore: typeof currentUserEntry?.score === "number" ? currentUserEntry.score : null,
         yourPlaying11: currentUserEntry?.playing11 || [],
-        canOpen: isRuntimeRoomOpenable(room.roomCode, room.id),
+        canOpen,
         leaderboard,
       };
     });

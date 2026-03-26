@@ -129,6 +129,7 @@ function createRoom(roomId) {
     disconnectTimeouts: new Map(), // socketId -> timeout
     closeTimeout: null,
     phaseStartedAt: Date.now(),
+    restoredFromDb: false,
   };
 }
 
@@ -287,6 +288,7 @@ async function closeRoomNow(roomId, reason, code = "ROOM_CLOSED") {
     await pool
       .query("UPDATE rooms SET status = 'finished' WHERE id = ?", [room.dbId])
       .catch((err) => console.error("Failed to mark room finished during close", err.message));
+    await clearAuctionState(room.dbId);
   }
 
   io.to(roomId).emit("room_closed", { code, reason });
@@ -398,6 +400,400 @@ function migrateSocketIdentity(room, previousSocketId, nextSocketId) {
   moveSetMembership(room.withdrawnUsers, previousSocketId, nextSocketId);
   moveSetMembership(room.disqualified, previousSocketId, nextSocketId);
   moveMapMembership(room.playing11, previousSocketId, nextSocketId);
+}
+
+function getPersistentUserKey(userId) {
+  const numericUserId = Number(userId);
+  if (!Number.isInteger(numericUserId) || numericUserId <= 0) return null;
+  return `user:${numericUserId}`;
+}
+
+function getRuntimeEntryUserId(room, runtimeKey) {
+  const numericUserId = Number(room?.users?.get(runtimeKey)?.userId || 0);
+  return Number.isInteger(numericUserId) && numericUserId > 0 ? numericUserId : null;
+}
+
+function serializeRuntimeUserIds(room, collection) {
+  const uniqueUserIds = new Set();
+  for (const runtimeKey of collection || []) {
+    const userId = getRuntimeEntryUserId(room, runtimeKey);
+    if (userId) {
+      uniqueUserIds.add(userId);
+    }
+  }
+  return Array.from(uniqueUserIds);
+}
+
+function serializePlaying11Entries(room) {
+  const entries = [];
+  for (const [runtimeKey, entry] of room.playing11.entries()) {
+    const userId = getRuntimeEntryUserId(room, runtimeKey);
+    if (!userId) continue;
+
+    entries.push({
+      userId,
+      score: Number(entry?.score || 0),
+      playerIds: Array.isArray(entry?.playerIds) ? entry.playerIds.map(Number) : [],
+      playerNames: Array.isArray(entry?.playerNames) ? entry.playerNames : [],
+      username: entry?.username || room.users.get(runtimeKey)?.username || null,
+      teamName: entry?.teamName || room.users.get(runtimeKey)?.teamName || null,
+      breakdown: entry?.breakdown || null,
+    });
+  }
+  return entries;
+}
+
+function normalizePlayerIdList(lineup) {
+  if (!Array.isArray(lineup)) return [];
+  return lineup
+    .map((value) => Number(value))
+    .filter((value) => Number.isInteger(value) && value > 0);
+}
+
+function getPlayerNameById(playerId) {
+  return playersMaster.find((player) => Number(player.id) === Number(playerId))?.name || null;
+}
+
+async function clearAuctionState(roomDbId) {
+  const numericRoomDbId = Number(roomDbId);
+  if (!Number.isInteger(numericRoomDbId) || numericRoomDbId <= 0) return;
+
+  await pool
+    .query("DELETE FROM auction_state WHERE room_id = ?", [numericRoomDbId])
+    .catch((err) => console.error("Failed to clear auction state", formatDbError(err)));
+}
+
+async function loadStoredAuctionState(roomDbId) {
+  const numericRoomDbId = Number(roomDbId);
+  if (!Number.isInteger(numericRoomDbId) || numericRoomDbId <= 0) return null;
+
+  const [stateRows] = await pool.query(
+    "SELECT state FROM auction_state WHERE room_id = ? LIMIT 1",
+    [numericRoomDbId]
+  );
+
+  return stateRows[0]?.state || null;
+}
+
+function isRecoverableStoredState(state) {
+  const status = String(state?.status || "").trim();
+  return ["starting", "transitioning", "running", "sold", "picking", "finished_finalized"].includes(status);
+}
+
+async function loadPersistedRoomUsers(roomDbId) {
+  const [participants] = await pool.query(
+    `SELECT rp.user_id AS "userId", u.username, rp.budget, rp.team_name AS "teamName"
+     FROM room_players rp
+     JOIN users u ON u.id = rp.user_id
+     WHERE rp.room_id = ?
+     ORDER BY rp.id ASC`,
+    [roomDbId]
+  );
+
+  const [teamRows] = await pool.query(
+    `SELECT tp.user_id AS "userId",
+            c.id,
+            c.name,
+            c.role,
+            c.batting_rating,
+            c.bowling_rating,
+            c.rating,
+            c.base_price,
+            c.country,
+            tp.price
+     FROM team_players tp
+     JOIN (
+       SELECT player_id, MAX(id) AS latest_id
+       FROM team_players
+       WHERE room_id = ?
+       GROUP BY player_id
+     ) latest ON latest.latest_id = tp.id
+     JOIN cricketers c ON c.id = tp.player_id
+     WHERE tp.room_id = ?
+     ORDER BY tp.user_id, c.role, c.name`,
+    [roomDbId, roomDbId]
+  );
+
+  const teamByUserId = new Map();
+  for (const row of teamRows) {
+    const userId = Number(row.userId);
+    const existing = teamByUserId.get(userId) || [];
+    existing.push(row);
+    teamByUserId.set(userId, existing);
+  }
+
+  return participants.map((participant) => {
+    const userId = Number(participant.userId);
+    const team = teamByUserId.get(userId) || [];
+    return {
+      username: participant.username,
+      team,
+      score: calculateScore(team),
+      budget: Number(participant.budget ?? 120),
+      userId,
+      teamName: participant.teamName || null,
+    };
+  });
+}
+
+async function loadPersistedPlaying11Entries(roomDbId) {
+  const [rows] = await pool.query(
+    `SELECT user_id AS "userId", lineup, score
+     FROM playing11
+     WHERE room_id = ?`,
+    [roomDbId]
+  );
+
+  return rows.map((row) => ({
+    userId: Number(row.userId),
+    score: Number(row.score || 0),
+    playerIds: normalizePlayerIdList(row.lineup),
+  }));
+}
+
+async function restoreRoomFromDatabase(roomId, roomDbId, metadata = {}, preloadedState = null) {
+  const room = getRoomForSession(roomId, roomDbId, metadata);
+  if (room.restoredFromDb) {
+    return room;
+  }
+
+  let recovered = preloadedState;
+  if (!recovered && roomDbId) {
+    try {
+      recovered = await loadStoredAuctionState(roomDbId);
+    } catch (err) {
+      console.error("State recovery failed", formatDbError(err));
+      return room;
+    }
+  }
+
+  if (!isRecoverableStoredState(recovered)) {
+    return room;
+  }
+
+  room.restoredFromDb = true;
+
+  try {
+    const persistedUsers = roomDbId ? await loadPersistedRoomUsers(roomDbId) : [];
+    const persistedUserMap = new Map();
+
+    room.users = new Map();
+    for (const persistedUser of persistedUsers) {
+      const runtimeKey = getPersistentUserKey(persistedUser.userId);
+      if (!runtimeKey) continue;
+      room.users.set(runtimeKey, persistedUser);
+      persistedUserMap.set(Number(persistedUser.userId), runtimeKey);
+    }
+
+    room.playersQueue =
+      Array.isArray(recovered?.playersQueue) && recovered.playersQueue.length
+        ? recovered.playersQueue
+        : organizePlayersIntoSets(playersMaster);
+    room.idx = Number(recovered?.idx || 0);
+    room.status = recovered?.status || room.status;
+    room.phaseStartedAt = Number(recovered?.phaseStartedAt || Date.now());
+    room.currentPlayer =
+      recovered?.currentPlayer ||
+      (room.idx > 0 && room.idx <= room.playersQueue.length ? room.playersQueue[room.idx - 1] : null);
+    room.currentBid = Number(recovered?.currentBid || 0);
+    room.highestBidderUserId = Number(recovered?.highestBidderUserId || 0) || null;
+    room.highestBidderName = recovered?.highestBidderName || null;
+    room.highestBidder = room.highestBidderUserId
+      ? persistedUserMap.get(Number(room.highestBidderUserId)) || null
+      : null;
+    room.lastBidAt = Number(recovered?.lastBidAt || Date.now());
+    room.lastActivityAt = Number(recovered?.lastActivityAt || room.lastBidAt || Date.now());
+    room.totalDuration = Number(recovered?.totalDuration || 13000);
+    room.warnedOnce = Boolean(recovered?.warnedOnce);
+    room.warnedTwice = Boolean(recovered?.warnedTwice);
+    room.bidHistory = Array.isArray(recovered?.bidHistory) ? recovered.bidHistory : [];
+    room.selectionStartTime = recovered?.selectionStartTime || null;
+    room.selectDeadline = recovered?.selectDeadline || null;
+    room.finalizingBid = false;
+
+    const toRuntimeSet = (userIds) =>
+      new Set(
+        (Array.isArray(userIds) ? userIds : [])
+          .map((userId) => persistedUserMap.get(Number(userId)))
+          .filter(Boolean)
+      );
+
+    room.passedUsers = toRuntimeSet(recovered?.passedUserIds);
+    room.skipPoolUsers = toRuntimeSet(recovered?.skipPoolUserIds);
+    room.blockedUsers = toRuntimeSet(recovered?.blockedUserIds);
+    room.withdrawnUsers = toRuntimeSet(recovered?.withdrawnUserIds);
+    room.disqualified = toRuntimeSet(recovered?.disqualifiedUserIds);
+
+    const playing11Entries =
+      Array.isArray(recovered?.playing11) && recovered.playing11.length
+        ? recovered.playing11
+        : roomDbId
+          ? await loadPersistedPlaying11Entries(roomDbId)
+          : [];
+    room.playing11 = new Map();
+    for (const entry of playing11Entries) {
+      const runtimeKey = persistedUserMap.get(Number(entry?.userId));
+      if (!runtimeKey) continue;
+
+      const roomUser = room.users.get(runtimeKey);
+      const playerIds = normalizePlayerIdList(entry?.playerIds);
+      const playerNames =
+        Array.isArray(entry?.playerNames) && entry.playerNames.length
+          ? entry.playerNames
+          : playerIds
+              .map((playerId) => roomUser?.team.find((player) => Number(player.id) === Number(playerId))?.name || getPlayerNameById(playerId))
+              .filter(Boolean);
+
+      room.playing11.set(runtimeKey, {
+        score: Number(entry?.score || 0),
+        playerIds,
+        playerNames,
+        username: entry?.username || roomUser?.username || null,
+        teamName: entry?.teamName || roomUser?.teamName || null,
+        breakdown: entry?.breakdown || null,
+      });
+    }
+
+    if (room.status === "running") {
+      const storedRemainingMs = Number(recovered?.remainingMs || 0);
+      if (storedRemainingMs > 0) {
+        room.totalDuration = storedRemainingMs;
+        room.lastBidAt = Date.now();
+        room.warnedOnce = false;
+        room.warnedTwice = false;
+      }
+    }
+
+    if (room.status === "finished_finalized") {
+      scheduleFinishedRoomClosure(roomId, room.dbId);
+    }
+
+    console.log(`Recovered persisted live state for room ${roomId}:`, {
+      status: room.status,
+      idx: room.idx,
+      participants: room.users.size,
+      currentPlayer: room.currentPlayer?.name || null,
+    });
+  } catch (err) {
+    console.error("Failed to restore room from database", formatDbError(err));
+  }
+
+  return room;
+}
+
+async function finishPersistedRoomSession(roomDbId) {
+  const numericRoomDbId = Number(roomDbId);
+  if (!Number.isInteger(numericRoomDbId) || numericRoomDbId <= 0) return;
+
+  await pool
+    .query("UPDATE rooms SET status = 'finished' WHERE id = ?", [numericRoomDbId])
+    .catch((err) => console.error("Failed to mark persisted room finished", formatDbError(err)));
+  await clearAuctionState(numericRoomDbId);
+}
+
+async function loadUnfinishedRoomSnapshots() {
+  const [rows] = await pool.query(
+    `SELECT r.id,
+            r.room_code AS "roomCode",
+            r.host_id AS "hostId",
+            r.status,
+            r.created_at AS "createdAt",
+            r.session_number AS "sessionNumber",
+            s.state
+     FROM rooms r
+     LEFT JOIN (
+       SELECT DISTINCT ON (room_id) room_id, state
+       FROM auction_state
+       ORDER BY room_id, id DESC
+     ) s ON s.room_id = r.id
+     WHERE r.status != 'finished'
+     ORDER BY r.created_at DESC, r.id DESC`
+  );
+
+  return rows.map((row) => ({
+    id: Number(row.id),
+    roomCode: row.roomCode,
+    hostId: row.hostId != null ? Number(row.hostId) : null,
+    status: row.status,
+    createdAt: row.createdAt,
+    sessionNumber: Number(row.sessionNumber || 1),
+    state: row.state || null,
+  }));
+}
+
+async function reconcilePersistedLiveRooms() {
+  const now = Date.now();
+  const snapshots = await loadUnfinishedRoomSnapshots();
+
+  for (const snapshot of snapshots) {
+    const roomId = String(snapshot.roomCode || "").trim();
+    if (!roomId) continue;
+
+    const runtimeRoom = rooms.get(roomId);
+    if (runtimeRoom && Number(runtimeRoom.dbId || 0) === Number(snapshot.id || 0)) {
+      continue;
+    }
+
+    const recoveredState = snapshot.state || null;
+    const effectiveStatus =
+      String(recoveredState?.status || (snapshot.status === "ongoing" ? "running" : snapshot.status || "waiting")).trim();
+    const createdAtMs = snapshot.createdAt ? new Date(snapshot.createdAt).getTime() : now;
+    const lastTouchMs = Number(recoveredState?.lastActivityAt || recoveredState?.lastBidAt || createdAtMs || now);
+    const selectDeadlineMs = Number(recoveredState?.selectDeadline || 0);
+    const isStale = now - lastTouchMs > INACTIVE_AUCTION_ROOM_RETENTION_MS;
+    const canRecoverFromState = isRecoverableStoredState(recoveredState);
+
+    if (effectiveStatus === "picking" && selectDeadlineMs > 0 && now >= selectDeadlineMs && canRecoverFromState) {
+      const restoredRoom = await restoreRoomFromDatabase(
+        roomId,
+        snapshot.id,
+        {
+          sessionNumber: snapshot.sessionNumber,
+          creatorUserId: snapshot.hostId,
+          createdAt: createdAtMs,
+        },
+        recoveredState
+      );
+      await autoFinalizePlaying11(restoredRoom.roomId);
+      continue;
+    }
+
+    if (effectiveStatus === "finished_finalized" && canRecoverFromState) {
+      const restoredRoom = await restoreRoomFromDatabase(
+        roomId,
+        snapshot.id,
+        {
+          sessionNumber: snapshot.sessionNumber,
+          creatorUserId: snapshot.hostId,
+          createdAt: createdAtMs,
+        },
+        recoveredState
+      );
+
+      if (selectDeadlineMs > 0 && now >= selectDeadlineMs + 1000) {
+        await closeRoomNow(restoredRoom.roomId, "This auction has ended and the room is now closed.", "RESULT_TIMER_ENDED");
+      } else {
+        scheduleFinishedRoomClosure(restoredRoom.roomId, restoredRoom.dbId);
+      }
+      continue;
+    }
+
+    if (["starting", "transitioning", "running", "sold", "picking"].includes(effectiveStatus) && !isStale && canRecoverFromState) {
+      await restoreRoomFromDatabase(
+        roomId,
+        snapshot.id,
+        {
+          sessionNumber: snapshot.sessionNumber,
+          creatorUserId: snapshot.hostId,
+          createdAt: createdAtMs,
+        },
+        recoveredState
+      );
+      continue;
+    }
+
+    await finishPersistedRoomSession(snapshot.id);
+  }
 }
 
 async function ensureRoomPlayerRow(roomDbId, userId, teamName, teamId) {
@@ -644,14 +1040,30 @@ async function persistAuctionState(roomId) {
   const room = rooms.get(roomId);
   if (!room || !room.dbId) return;
 
+  const timerSnapshot = getTimerSnapshot(room);
+
   const state = {
     idx: room.idx,
     status: room.status,
+    phaseStartedAt: room.phaseStartedAt,
     currentBid: room.currentBid,
+    currentPlayer: room.currentPlayer,
     highestBidderUserId: room.highestBidderUserId,
     highestBidderName: room.highestBidderName,
     lastBidAt: room.lastBidAt,
+    lastActivityAt: room.lastActivityAt,
     totalDuration: room.totalDuration,
+    remainingMs: timerSnapshot?.remainingMs ?? null,
+    warnedOnce: room.warnedOnce,
+    warnedTwice: room.warnedTwice,
+    playersQueue: room.playersQueue,
+    bidHistory: room.bidHistory || [],
+    passedUserIds: serializeRuntimeUserIds(room, room.passedUsers),
+    skipPoolUserIds: serializeRuntimeUserIds(room, room.skipPoolUsers),
+    blockedUserIds: serializeRuntimeUserIds(room, room.blockedUsers),
+    withdrawnUserIds: serializeRuntimeUserIds(room, room.withdrawnUsers),
+    disqualifiedUserIds: serializeRuntimeUserIds(room, room.disqualified),
+    playing11: serializePlaying11Entries(room),
     selectionStartTime: room.selectionStartTime,
     selectDeadline: room.selectDeadline,
   };
@@ -865,6 +1277,7 @@ async function finalizeBid(roomId) {
 
   room.finalizingBid = true;
   setRoomStatus(room, "sold");
+  await persistAuctionState(roomId);
   const soldPlayer = { ...room.currentPlayer };
   const soldPrice = Number(room.currentBid || soldPlayer.base_price || 0);
 
@@ -1082,6 +1495,7 @@ function endAuction(roomId) {
 
   room.selectionStartTime = Date.now();
   room.selectDeadline = Date.now() + 5 * 60 * 1000; // 5 minutes total
+  persistAuctionState(roomId);
   setTimeout(() => autoFinalizePlaying11(roomId), 5 * 60 * 1000 + 500);
 
   io.to(roomId).emit("auction_complete", {
@@ -1196,6 +1610,7 @@ async function autoFinalizePlaying11(roomId) {
 
   room.disqualified = disqualified;
   setRoomStatus(room, "finished_finalized");
+  await persistAuctionState(roomId);
 
   const results = Array.from(room.playing11.values()).sort((a, b) => b.score - a.score);
   const winnerName = results[0]?.teamName || results[0]?.username || "No winner";
@@ -1271,14 +1686,7 @@ function handleBid(socket, amount) {
   });
 
   maybeAutoResolve(roomId, true);
-  
-  // SMART SAVE: Persist to DB at most once every 7 seconds during active bidding
-  // to ensure recovery is possible without crashing the server.
-  const now = Date.now();
-  if (!room.lastDbPersist || (now - room.lastDbPersist > 7000)) {
-    room.lastDbPersist = now;
-    persistAuctionState(roomId);
-  }
+  persistAuctionState(roomId);
 }
 
 const EMPTY_ROOM_RETENTION_MS = 2 * 60 * 60 * 1000;
@@ -1339,6 +1747,12 @@ setInterval(async () => {
       console.log(`Cleaning up inactive room: ${roomId}`);
       if (room.timer) clearInterval(room.timer);
       if (room.closeTimeout) clearTimeout(room.closeTimeout);
+      if (room.dbId) {
+        await pool
+          .query("UPDATE rooms SET status = 'finished' WHERE id = ?", [room.dbId])
+          .catch((err) => console.error("Failed to mark empty room finished during cleanup", formatDbError(err)));
+        await clearAuctionState(room.dbId);
+      }
       rooms.delete(roomId);
       removedRoom = true;
       continue;
@@ -1410,6 +1824,7 @@ io.on("connection", (socket) => {
     let room = null;
     let existingSocketId = null;
     let existingUser = null;
+    let latestStoredState = null;
     try {
       if (authenticatedSession?.userId) {
         const [users] = await pool.query(
@@ -1438,14 +1853,23 @@ io.on("connection", (socket) => {
       socket.data.username = cleanName;
 
       let latestSession = await getLatestRoomSession(pool, roomId);
+      latestStoredState = latestSession?.id ? await loadStoredAuctionState(latestSession.id).catch(() => null) : null;
       const liveRuntimeRoom = rooms.get(roomId);
       const shouldReuseFinishedLiveSession =
         latestSession?.status === "finished" &&
         liveRuntimeRoom &&
         Number(liveRuntimeRoom.dbId || 0) === Number(latestSession.id || 0) &&
         ["picking", "finished_finalized"].includes(liveRuntimeRoom.status);
+      const shouldReuseFinishedStoredSession =
+        latestSession?.status === "finished" &&
+        isRecoverableStoredState(latestStoredState);
 
-      if (!latestSession || (latestSession.status === "finished" && !shouldReuseFinishedLiveSession)) {
+      if (
+        !latestSession ||
+        (latestSession.status === "finished" &&
+          !shouldReuseFinishedLiveSession &&
+          !shouldReuseFinishedStoredSession)
+      ) {
         if (!authenticatedSession?.userId) {
           socket.emit("join_error", {
             code: "AUTH_REQUIRED_CREATE",
@@ -1471,6 +1895,18 @@ io.on("connection", (socket) => {
         creatorName: roomCreatorUserId === userId ? cleanName : undefined,
         visibility: roomCreatorUserId === userId ? requestedVisibility : undefined,
       });
+      room = await restoreRoomFromDatabase(
+        roomId,
+        roomDbId,
+        {
+          sessionNumber: roomSessionNumber,
+          creatorUserId: roomCreatorUserId,
+          createdAt: roomCreatedAt,
+          creatorName: roomCreatorUserId === userId ? cleanName : undefined,
+          visibility: roomCreatorUserId === userId ? requestedVisibility : undefined,
+        },
+        latestStoredState
+      );
       [existingSocketId, existingUser] = findRoomUser(room, userId, cleanName);
 
       // Check if auction is ongoing and user is not already registered
@@ -1523,33 +1959,6 @@ io.on("connection", (socket) => {
       creatorUserId: roomCreatorUserId,
       createdAt: roomCreatedAt,
     });
-
-    // Attempt state recovery if room is fresh
-    if (room.idx === 0 && room.status === "waiting") {
-      try {
-        const [stateRows] = await pool.query("SELECT state FROM auction_state WHERE room_id = ?", [roomDbId]);
-        if (stateRows.length) {
-          const recovered = stateRows[0].state;
-          console.log(`Recovering state for room ${roomId}:`, recovered);
-          room.idx = recovered.idx || 0;
-          room.status = recovered.status || "waiting";
-          room.currentBid = recovered.currentBid || 0;
-          room.highestBidderUserId = recovered.highestBidderUserId;
-          room.highestBidderName = recovered.highestBidderName;
-          room.lastBidAt = recovered.lastBidAt;
-          room.totalDuration = recovered.totalDuration || 13000;
-          room.selectionStartTime = recovered.selectionStartTime;
-          room.selectDeadline = recovered.selectDeadline;
-
-          // Re-fetch current player if needed
-          if (room.idx > 0 && !room.currentPlayer) {
-            room.currentPlayer = room.playersQueue[room.idx - 1];
-          }
-        }
-      } catch (err) {
-        console.error("State recovery failed", err.message);
-      }
-    }
 
     socket.data.userId = userId;
     if (!existingUser) {
@@ -1625,6 +2034,15 @@ io.on("connection", (socket) => {
     }
 
     socket.join(roomId);
+    if (room.status === "running" && !room.timer) {
+      startTimer(roomId, { preserveElapsed: true });
+    }
+    if (room.status === "picking" && room.selectDeadline && Date.now() > Number(room.selectDeadline)) {
+      autoFinalizePlaying11(roomId);
+    }
+    if (room.status === "finished_finalized") {
+      scheduleFinishedRoomClosure(roomId, room.dbId);
+    }
     broadcastPlayers(roomId);
     const results = room.status === "finished_finalized" ? Array.from(room.playing11.values()).sort((a, b) => b.score - a.score) : null;
     const winner = results?.[0]?.teamName || results?.[0]?.username || "No winner";
@@ -1766,6 +2184,7 @@ io.on("connection", (socket) => {
       user.score = 0;
     }
 
+    persistAuctionState(resolvedRoom);
     broadcastPublicRooms();
 
     io.to(resolvedRoom).emit("start_auction");
@@ -1804,6 +2223,7 @@ io.on("connection", (socket) => {
       note: "skip pool vote",
     });
     io.to(roomId).emit("bid_update", { amount: room.currentBid, by: room.highestBidderName, history: room.bidHistory.slice(-10) });
+    persistAuctionState(roomId);
 
     // Check if everyone has either passed or voted to skip
     maybeAutoResolve(roomId, true);
@@ -1817,6 +2237,7 @@ io.on("connection", (socket) => {
 
     room.blockedUsers.add(socket.id);
     room.withdrawnUsers.add(socket.id);
+    persistAuctionState(roomId);
 
     if (room.currentPlayer && room.highestBidder === socket.id) {
       room.bidHistory.push({
@@ -1845,6 +2266,7 @@ io.on("connection", (socket) => {
       ts: Date.now(),
       note: "pass",
     });
+    persistAuctionState(roomId);
 
     if (room.highestBidder === socket.id) {
       // Do nothing to the bid. The user is just passing further bids, 
@@ -1930,6 +2352,7 @@ io.on("connection", (socket) => {
       persistPlaying11(room.dbId, user.userId, ids, evalResult.score)
         .catch((err) => console.error("Failed to persist playing11", formatDbError(err)));
     }
+    persistAuctionState(roomId);
 
     const eligibleParticipantCount = getEligiblePlaying11Participants(room).length;
     const submissions = room.playing11.size;
@@ -2034,6 +2457,11 @@ async function bootstrap() {
 
   playersMaster = await loadPlayers();
   teamsMaster = await loadTeams();
+  try {
+    await reconcilePersistedLiveRooms();
+  } catch (err) {
+    console.error("Failed to reconcile persisted rooms during bootstrap", formatDbError(err));
+  }
   const port = process.env.PORT || 5000;
   server.listen(port, () => {
     console.log(`Auction server listening on ${port}`);
