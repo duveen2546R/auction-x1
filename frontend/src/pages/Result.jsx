@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, useCallback } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import socket from "../socket";
 
@@ -44,22 +44,18 @@ function validateLineup(team, ids) {
 export default function Result() {
     const { state } = useLocation();
     const navigate = useNavigate();
-    const team = state?.team || [];
+    const roomId = state?.roomId || "";
+    const team = useMemo(() => (Array.isArray(state?.team) ? state.team : []), [state?.team]);
     const isDisqualified = state?.disqualified;
     const deadline = state?.deadline || null;
-    const initialStartTime = state?.selectionStartTime || null;
-    const [selectionStartTime, setSelectionStartTime] = useState(initialStartTime);
     const [selected, setSelected] = useState([]);
     const [submitting, setSubmitting] = useState(false);
     const [error, setError] = useState(null);
-    const [results, setResults] = useState(null);
-    const [winner, setWinner] = useState(null);
+    const [results, setResults] = useState(Array.isArray(state?.results) ? state.results : null);
+    const [winner, setWinner] = useState(state?.winner || null);
     const [remaining, setRemaining] = useState(null);
-    const [waitRemaining, setWaitRemaining] = useState(null);
 
     const teamName = localStorage.getItem("teamName") || "";
-    const username = localStorage.getItem("username") || "Player";
-
     const slugMap = {
         "royal challengers bangalore": "banglore",
         "chennai super kings": "chennai",
@@ -76,7 +72,7 @@ export default function Result() {
     const bgSlug = useMemo(() => {
         try {
             return teamName ? slugMap[teamName.toLowerCase()] || null : null;
-        } catch (e) {
+        } catch {
             return null;
         }
     }, [teamName]);
@@ -91,23 +87,32 @@ export default function Result() {
             setError(payload.reason);
             setSubmitting(false);
         };
-        const onAuctionComplete = (payload) => {
-            if (payload.selectionStartTime) {
-                setSelectionStartTime(payload.selectionStartTime);
+        const onRoomClosed = (payload) => {
+            if (payload?.code !== "RESULT_TIMER_ENDED") {
+                alert(payload?.reason || "This room was closed.");
             }
+            navigate("/");
         };
 
         socket.on("playing11_results", onResults);
         socket.on("playing11_error", onErr);
         socket.on("playing11_ack", () => setSubmitting(true));
-        socket.on("auction_complete", onAuctionComplete);
+        socket.on("room_closed", onRoomClosed);
         return () => {
             socket.off("playing11_results", onResults);
             socket.off("playing11_error", onErr);
             socket.off("playing11_ack");
-            socket.off("auction_complete", onAuctionComplete);
+            socket.off("room_closed", onRoomClosed);
         };
-    }, []);
+    }, [navigate]);
+
+    useEffect(() => {
+        return () => {
+            if (roomId) {
+                socket.emit("leave_room", { roomId });
+            }
+        };
+    }, [roomId]);
 
     useEffect(() => {
         if (!deadline) return;
@@ -115,17 +120,11 @@ export default function Result() {
             const ms = deadline - Date.now();
             const rounded = ms > 0 ? Math.ceil(ms / 1000) : 0;
             setRemaining(rounded);
-
-            // Auto-submit when time is up
-            if (ms <= 0 && !submitting && !results && !isDisqualified) {
-                setSubmitting(true);
-                socket.emit("submit_playing11", { playerIds: selected });
-            }
         };
         tick();
         const interval = setInterval(tick, 1000);
         return () => clearInterval(interval);
-    }, [deadline, submitting, results, isDisqualified, selected]);
+    }, [deadline]);
 
     useEffect(() => {
         const onJoinAck = (payload) => {
@@ -139,27 +138,7 @@ export default function Result() {
         return () => socket.off("join_ack", onJoinAck);
     }, []);
 
-    useEffect(() => {
-        if (!selectionStartTime) return;
-        const waitPeriod = 3 * 60 * 1000;
-        const tick = () => {
-            const elapsed = Date.now() - selectionStartTime;
-            const ms = waitPeriod - elapsed;
-            setWaitRemaining(ms > 0 ? Math.ceil(ms / 1000) : 0);
-        };
-        tick();
-        const interval = setInterval(tick, 1000);
-        return () => clearInterval(interval);
-    }, [selectionStartTime]);
-
     const validation = useMemo(() => validateLineup(team, selected), [team, selected]);
-
-    // Sync current selection with server for auto-submission backup
-    useEffect(() => {
-        if (selected.length > 0) {
-            socket.emit("sync_lineup", { playerIds: selected });
-        }
-    }, [selected]);
 
     const toggle = (id) => {
         if (selected.includes(id)) {
@@ -172,7 +151,7 @@ export default function Result() {
     };
 
     const submit = () => {
-        if (isDisqualified || waitRemaining > 0) return;
+        if (isDisqualified) return;
         setError(null);
         const v = validateLineup(team, selected);
         if (!v.ok) {
@@ -353,15 +332,13 @@ export default function Result() {
                                 <button 
                                     className="primary-btn w-full !py-4 !rounded-xl text-sm font-black tracking-[0.2em] uppercase italic disabled:opacity-30 disabled:cursor-not-allowed" 
                                     onClick={submit} 
-                                    disabled={!validation.ok || submitting || isDisqualified || waitRemaining > 0}
+                                    disabled={!validation.ok || submitting || isDisqualified}
                                 >
                                     {submitting ? (
                                         <span className="flex items-center justify-center gap-2">
                                             <span className="w-2 h-2 rounded-full bg-white animate-pulse"></span>
                                             AWAITING ALL TEAMS...
                                         </span>
-                                    ) : waitRemaining > 0 ? (
-                                        `STRATEGIZE (${waitRemaining}s)`
                                     ) : (
                                         "LOCK IN PLAYING XI"
                                     )}

@@ -3,9 +3,16 @@ import express from "express";
 import cors from "cors";
 import { Server } from "socket.io";
 import "./env.js";
+import { ensureAuthSchema, verifyAuthToken } from "./auth.js";
 import pool, { formatDbError, getDatabaseSummary, verifyDatabaseConnection } from "./db.js";
 import { loadPlayers } from "./playerStore.js";
 import { loadTeams } from "./teamStore.js";
+import {
+  createRoomSession,
+  ensureRoomSessionSchema,
+  getLatestRoomSession,
+} from "./roomSessions.js";
+import { rooms, PUBLIC_ROOMS_CHANNEL } from "./runtimeRooms.js";
 import apiRouter from "./routes.js";
 
 const app = express();
@@ -32,7 +39,6 @@ const io = new Server(server, {
   },
 });
 
-const rooms = new Map();
 let playersMaster = [];
 let teamsMaster = [];
 
@@ -88,6 +94,12 @@ function createRoom(roomId) {
   return {
     roomId,
     dbId: null,
+    sessionNumber: 1,
+    visibility: "private",
+    creatorUserId: null,
+    creatorName: null,
+    creatorTeamName: null,
+    createdAt: Date.now(),
     playersQueue: queuedPlayers,
     idx: 0,
     users: new Map(),
@@ -101,6 +113,7 @@ function createRoom(roomId) {
     timeLeft: 0,
     status: "waiting",
     lastBidAt: Date.now(),
+    lastActivityAt: Date.now(),
     warnedOnce: false,
     warnedTwice: false,
     totalDuration: 13000,
@@ -114,6 +127,8 @@ function createRoom(roomId) {
     voiceUsers: new Set(),
     finalizingBid: false,
     disconnectTimeouts: new Map(), // socketId -> timeout
+    closeTimeout: null,
+    phaseStartedAt: Date.now(),
   };
 }
 
@@ -124,15 +139,182 @@ function activeSockets(room) {
   );
 }
 
-function getRoom(roomId, dbId = null) {
+function getEligiblePlaying11Participants(room) {
+  return Array.from(room.users.entries())
+    .filter(([socketId, user]) => !room.disqualified.has(socketId) && Array.isArray(user?.team))
+    .map(([socketId]) => socketId);
+}
+
+function setRoomStatus(room, status) {
+  if (!room) return;
+  room.status = status;
+  room.phaseStartedAt = Date.now();
+}
+
+function getTimerSnapshot(room) {
+  if (!room || room.status !== "running" || !room.currentPlayer) return null;
+
+  const totalMs = Number(room.totalDuration || 13000);
+  const referenceTime = Number(room.lastBidAt || Date.now());
+  const remainingMs = Math.max(0, totalMs - (Date.now() - referenceTime));
+
+  return {
+    remainingMs,
+    totalMs,
+    percent: totalMs > 0 ? (remainingMs / totalMs) * 100 : 0,
+  };
+}
+
+function emitTimerTick(roomId, room) {
+  const snapshot = getTimerSnapshot(room);
+  if (!snapshot) return null;
+  io.to(roomId).emit("timer_tick", snapshot);
+  return snapshot;
+}
+
+function syncRoomMetadata(room, metadata = {}) {
+  if (metadata.dbId && !room.dbId) {
+    room.dbId = metadata.dbId;
+  }
+  if (metadata.sessionNumber) {
+    room.sessionNumber = Number(metadata.sessionNumber) || room.sessionNumber || 1;
+  }
+  if (metadata.visibility) {
+    room.visibility = metadata.visibility === "public" ? "public" : "private";
+  }
+  if (metadata.creatorUserId && !room.creatorUserId) {
+    room.creatorUserId = metadata.creatorUserId;
+  }
+  if (metadata.creatorName) {
+    room.creatorName = metadata.creatorName;
+  }
+  if (metadata.creatorTeamName) {
+    room.creatorTeamName = metadata.creatorTeamName;
+  }
+  if (metadata.createdAt && !room.createdAt) {
+    room.createdAt = metadata.createdAt;
+  }
+}
+
+function getRoom(roomId, dbId = null, metadata = {}) {
   if (!rooms.has(roomId)) {
     rooms.set(roomId, createRoom(roomId));
   }
   const room = rooms.get(roomId);
-  if (dbId && !room.dbId) {
-    room.dbId = dbId;
-  }
+  syncRoomMetadata(room, { dbId, ...metadata });
   return room;
+}
+
+function replaceRoom(roomId, dbId = null, metadata = {}) {
+  const existingRoom = rooms.get(roomId);
+  if (existingRoom?.timer) {
+    clearInterval(existingRoom.timer);
+  }
+  if (existingRoom?.closeTimeout) {
+    clearTimeout(existingRoom.closeTimeout);
+  }
+
+  const nextRoom = createRoom(roomId);
+  syncRoomMetadata(nextRoom, { dbId, ...metadata });
+  rooms.set(roomId, nextRoom);
+  return nextRoom;
+}
+
+function isTerminalRoomStatus(status) {
+  return status === "picking" || status === "finished_finalized";
+}
+
+function getRoomForSession(roomId, dbId = null, metadata = {}) {
+  const existingRoom = rooms.get(roomId);
+  const hasDifferentSession =
+    Boolean(existingRoom?.dbId) && Boolean(dbId) && Number(existingRoom.dbId) !== Number(dbId);
+  const canReplaceExistingRoom =
+    isTerminalRoomStatus(existingRoom?.status) ||
+    (existingRoom?.status === "waiting" && existingRoom.users.size === 0);
+
+  if (hasDifferentSession && canReplaceExistingRoom) {
+    return replaceRoom(roomId, dbId, metadata);
+  }
+
+  return getRoom(roomId, dbId, metadata);
+}
+
+function getActiveLobbyParticipants(room) {
+  return activeSockets(room).map((socketId) => room.users.get(socketId)).filter(Boolean);
+}
+
+function getPublicRoomsSnapshot() {
+  return Array.from(rooms.values())
+    .filter((room) => room.visibility === "public" && room.status === "waiting")
+    .map((room) => {
+      const participants = getActiveLobbyParticipants(room);
+      if (participants.length === 0) return null;
+
+      return {
+        roomId: room.roomId,
+        visibility: room.visibility,
+        participantCount: participants.length,
+        creatorName: room.creatorName || participants.find((entry) => entry.userId === room.creatorUserId)?.username || "Host",
+        creatorTeamName: room.creatorTeamName || participants.find((entry) => entry.userId === room.creatorUserId)?.teamName || null,
+        createdAt: room.createdAt || Date.now(),
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => b.createdAt - a.createdAt);
+}
+
+function broadcastPublicRooms() {
+  io.to(PUBLIC_ROOMS_CHANNEL).emit("public_rooms_update", getPublicRoomsSnapshot());
+}
+
+function touchRoomActivity(room) {
+  if (!room) return;
+  room.lastActivityAt = Date.now();
+}
+
+async function closeRoomNow(roomId, reason, code = "ROOM_CLOSED") {
+  const room = rooms.get(roomId);
+  if (!room) return;
+
+  if (room.timer) {
+    clearInterval(room.timer);
+  }
+  if (room.closeTimeout) {
+    clearTimeout(room.closeTimeout);
+  }
+
+  if (room.dbId) {
+    await pool
+      .query("UPDATE rooms SET status = 'finished' WHERE id = ?", [room.dbId])
+      .catch((err) => console.error("Failed to mark room finished during close", err.message));
+  }
+
+  io.to(roomId).emit("room_closed", { code, reason });
+  io.in(roomId).socketsLeave(roomId);
+  rooms.delete(roomId);
+  broadcastPublicRooms();
+}
+
+function scheduleFinishedRoomClosure(roomId, sessionDbId) {
+  const room = rooms.get(roomId);
+  if (!room) return;
+
+  if (room.closeTimeout) {
+    clearTimeout(room.closeTimeout);
+  }
+
+  const now = Date.now();
+  const deadlineMs = Number(room.selectDeadline || 0);
+  const msUntilDeadline = deadlineMs > now ? deadlineMs - now : 0;
+  const closeDelayMs = Math.max(1000, msUntilDeadline + 1000);
+
+  room.closeTimeout = setTimeout(() => {
+    const latestRoom = rooms.get(roomId);
+    if (!latestRoom) return;
+    if (latestRoom.status !== "finished_finalized") return;
+    if (sessionDbId && latestRoom.dbId && Number(latestRoom.dbId) !== Number(sessionDbId)) return;
+    closeRoomNow(roomId, "This auction has ended and the room is now closed.", "RESULT_TIMER_ENDED");
+  }, closeDelayMs);
 }
 
 function calculateScore(team = []) {
@@ -219,62 +401,39 @@ function migrateSocketIdentity(room, previousSocketId, nextSocketId) {
 }
 
 async function ensureRoomPlayerRow(roomDbId, userId, teamName, teamId) {
-  const [existingRows] = await pool.query(
-    `SELECT id, budget, team_name, team_id
-     FROM room_players
-     WHERE room_id = ? AND user_id = ?
-     ORDER BY id DESC`,
-    [roomDbId, userId]
-  );
-
-  if (!existingRows.length) {
-    let initialBudget = 120;
-    if (teamId) {
-      try {
-        const [teams] = await pool.query("SELECT budget FROM teams WHERE id = ?", [teamId]);
-        if (teams.length) {
-          initialBudget = Number(teams[0].budget);
-          console.log(`Setting initial budget for user ${userId} in room ${roomDbId} from team ${teamId}: ${initialBudget}`);
-        }
-      } catch (err) {
-        console.warn("Failed to fetch team budget", err.message);
+  let initialBudget = 120;
+  if (teamId) {
+    try {
+      const [teams] = await pool.query("SELECT budget FROM teams WHERE id = ?", [teamId]);
+      if (teams.length) {
+        initialBudget = Number(teams[0].budget);
+        console.log(`Setting initial budget for user ${userId} in room ${roomDbId} from team ${teamId}: ${initialBudget}`);
       }
+    } catch (err) {
+      console.warn("Failed to fetch team budget", err.message);
     }
-
-    await pool.query(
-      "INSERT INTO room_players (room_id, user_id, budget, team_name, team_id) VALUES (?, ?, ?, ?, ?)",
-      [roomDbId, userId, initialBudget, teamName, teamId]
-    );
-
-    return {
-      budget: initialBudget,
-      teamName: teamName || null,
-    };
   }
 
-  const [latestRow, ...duplicateRows] = existingRows;
-  console.log(`Found existing room_player row for user ${userId} in room ${roomDbId}. Current budget: ${latestRow.budget}`);
-  const nextTeamName = teamName || latestRow.team_name || null;
-  const nextTeamId = teamId ?? latestRow.team_id ?? null;
-
-  await pool.query(
-    "UPDATE room_players SET team_name = ?, team_id = ? WHERE id = ?",
-    [nextTeamName, nextTeamId, latestRow.id]
+  const [upsertResult] = await pool.query(
+    `INSERT INTO room_players (room_id, user_id, budget, team_name, team_id)
+     VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT (room_id, user_id)
+     DO UPDATE SET
+       team_name = COALESCE(EXCLUDED.team_name, room_players.team_name),
+       team_id = COALESCE(EXCLUDED.team_id, room_players.team_id)
+     RETURNING id, budget, team_name AS "teamName", team_id AS "teamId"`,
+    [roomDbId, userId, initialBudget, teamName, teamId]
   );
 
-  if (duplicateRows.length) {
-    const duplicateIds = duplicateRows.map((row) => row.id);
-    const placeholders = duplicateIds.map(() => "?").join(", ");
-    await pool.query(
-      `DELETE FROM room_players WHERE id IN (${placeholders})`,
-      duplicateIds
-    );
+  const row = upsertResult.rows?.[0] || null;
+  if (row?.budget != null && Number(row.budget) !== Number(initialBudget)) {
+    console.log(`Found existing room_player row for user ${userId} in room ${roomDbId}. Current budget: ${row.budget}`);
   }
 
   return {
-    budget: Number(latestRow.budget ?? 120),
-    teamName: nextTeamName,
-    duplicateCount: duplicateRows.length,
+    budget: Number(row?.budget ?? initialBudget),
+    teamName: row?.teamName || teamName || null,
+    duplicateCount: 0,
   };
 }
 
@@ -347,19 +506,24 @@ function broadcastPlayers(roomId) {
     .map(([, u]) => ({
       username: u.username,
       team: u.teamName || null,
+      isCreator: Boolean(room.creatorUserId && u.userId === room.creatorUserId),
     }));
 
   io.to(roomId).emit("players_update", players);
+  broadcastPublicRooms();
 }
 
-function startTimer(roomId) {
+function startTimer(roomId, { preserveElapsed = false } = {}) {
   const room = rooms.get(roomId);
   if (!room) return;
-  room.lastBidAt = Date.now();
-  room.warnedOnce = false;
-  room.warnedTwice = false;
+  if (!preserveElapsed || !room.lastBidAt) {
+    room.lastBidAt = Date.now();
+    room.warnedOnce = false;
+    room.warnedTwice = false;
+  }
 
   if (room.timer) clearInterval(room.timer);
+  emitTimerTick(roomId, room);
   room.timer = setInterval(async () => {
     const activeIds = activeSockets(room);
     if (activeIds.length === 0) {
@@ -368,15 +532,10 @@ function startTimer(roomId) {
       return;
     }
 
-    const idleMs = Date.now() - (room.lastBidAt || 0);
     const totalDuration = room.totalDuration || 13000;
-    const remainingMs = Math.max(0, totalDuration - idleMs);
-
-    io.to(roomId).emit("timer_tick", {
-      remainingMs,
-      totalMs: totalDuration,
-      percent: (remainingMs / totalDuration) * 100
-    });
+    const idleMs = Date.now() - (room.lastBidAt || 0);
+    const snapshot = emitTimerTick(roomId, room);
+    const remainingMs = snapshot?.remainingMs ?? Math.max(0, totalDuration - idleMs);
 
     if (!room.warnedOnce && remainingMs <= 5000) {
       room.warnedOnce = true;
@@ -525,7 +684,8 @@ async function startNextPlayer(roomId) {
   }
 
   // Set status to pending while finding next player
-  room.status = "transitioning";
+  setRoomStatus(room, "transitioning");
+  broadcastPublicRooms();
   await persistAuctionState(roomId);
 
   // Find the next player in the queue who hasn't been sold or marked unsold
@@ -572,7 +732,9 @@ async function startNextPlayer(roomId) {
       room.highestBidder = null;
       room.highestBidderUserId = null;
       room.highestBidderName = null;
-      room.status = "running";
+      setRoomStatus(room, "running");
+      broadcastPublicRooms();
+      room.totalDuration = 13000;
       room.lastBidAt = Date.now();
       room.warnedOnce = false;
       room.warnedTwice = false;
@@ -609,7 +771,8 @@ async function startNextPlayer(roomId) {
   room.highestBidder = null;
   room.highestBidderUserId = null;
   room.highestBidderName = null;
-  room.status = "running";
+  setRoomStatus(room, "running");
+  broadcastPublicRooms();
   room.totalDuration = 13000;
   room.lastBidAt = Date.now();
   room.warnedOnce = false;
@@ -701,7 +864,7 @@ async function finalizeBid(roomId) {
   if (!room || !room.currentPlayer || room.finalizingBid) return;
 
   room.finalizingBid = true;
-  room.status = "sold";
+  setRoomStatus(room, "sold");
   const soldPlayer = { ...room.currentPlayer };
   const soldPrice = Number(room.currentBid || soldPlayer.base_price || 0);
 
@@ -857,7 +1020,7 @@ async function finalizeBid(roomId) {
 function endAuction(roomId) {
   const room = rooms.get(roomId);
   if (!room || room.status === "picking" || room.status === "finished_finalized") return;
-  room.status = "picking";
+  setRoomStatus(room, "picking");
   if (room.timer) {
     clearInterval(room.timer);
     room.timer = null;
@@ -930,7 +1093,7 @@ function endAuction(roomId) {
   });
 }
 
-function buildAutoLineup(team, partialPicks = []) {
+function buildAutoLineup(team) {
   const isOverseas = (p) => (p.country || "").toLowerCase() !== "india";
 
   const isValid = (lineup) => {
@@ -972,17 +1135,6 @@ function buildAutoLineup(team, partialPicks = []) {
     const lineup = [];
     const ownedIds = new Set();
 
-    // In early attempts, try to respect partial picks from the frontend
-    if (i < 200 && Array.isArray(partialPicks) && partialPicks.length > 0) {
-      for (const id of partialPicks) {
-        const p = team.find(x => Number(x.id) === Number(id));
-        if (p && !ownedIds.has(p.id)) {
-          lineup.push(p);
-          ownedIds.add(p.id);
-        }
-      }
-    }
-
     // Fill to 11
     for (const p of shuffled) {
       if (lineup.length >= 11) break;
@@ -1004,6 +1156,7 @@ async function autoFinalizePlaying11(roomId) {
 
   const allUserIds = Array.from(room.users.keys());
   const disqualified = room.disqualified || new Set();
+  const persistJobs = [];
 
   for (const sid of allUserIds) {
     if (disqualified.has(sid)) continue;
@@ -1012,7 +1165,7 @@ async function autoFinalizePlaying11(roomId) {
     const user = room.users.get(sid);
     if (!user || !user.team) continue;
 
-    const lineup = buildAutoLineup(user.team, user.partialLineup || []);
+    const lineup = buildAutoLineup(user.team);
     if (lineup) {
       const evalResult = evaluatePlaying11(room, sid, lineup.map((p) => p.id));
       if (evalResult.ok) {
@@ -1024,8 +1177,10 @@ async function autoFinalizePlaying11(roomId) {
           playerNames: lineup.map(p => p.name)
         });
         if (room.dbId && user.userId) {
-          persistPlaying11(room.dbId, user.userId, lineup.map((p) => p.id), evalResult.score)
-            .catch((err) => console.error("Failed to persist playing11", formatDbError(err)));
+          persistJobs.push(
+            persistPlaying11(room.dbId, user.userId, lineup.map((p) => p.id), evalResult.score)
+              .catch((err) => console.error("Failed to persist playing11", formatDbError(err)))
+          );
         }
       } else {
         disqualified.add(sid);
@@ -1035,14 +1190,19 @@ async function autoFinalizePlaying11(roomId) {
     }
   }
 
+  if (persistJobs.length) {
+    await Promise.allSettled(persistJobs);
+  }
+
   room.disqualified = disqualified;
-  room.status = "finished_finalized";
+  setRoomStatus(room, "finished_finalized");
 
   const results = Array.from(room.playing11.values()).sort((a, b) => b.score - a.score);
   const winnerName = results[0]?.teamName || results[0]?.username || "No winner";
   const dqNames = Array.from(disqualified).map((sid) => room.users.get(sid)?.teamName || room.users.get(sid)?.username).filter(Boolean);
 
   io.to(roomId).emit("playing11_results", { winner: winnerName, results, disqualified: dqNames });
+  scheduleFinishedRoomClosure(roomId, room.dbId);
 }
 
 
@@ -1086,6 +1246,7 @@ function handleBid(socket, amount) {
   room.highestBidderUserId = user?.userId || null;
   room.highestBidderName = bidderName;
   room.lastBidAt = Date.now();
+  touchRoomActivity(room);
   room.warnedOnce = false;
   room.warnedTwice = false;
   room.passedUsers.delete(socket.id);
@@ -1120,58 +1281,209 @@ function handleBid(socket, amount) {
   }
 }
 
-// Room Cleanup Mechanism: Remove rooms inactive for more than 2 hours
-setInterval(() => {
+const EMPTY_ROOM_RETENTION_MS = 2 * 60 * 60 * 1000;
+const INACTIVE_AUCTION_ROOM_RETENTION_MS = 30 * 60 * 1000;
+const ROOM_CLEANUP_INTERVAL_MS = 60 * 1000;
+const AUCTION_STALL_WATCHDOG_INTERVAL_MS = 5000;
+
+function isAuctionFlowRoomStatus(status) {
+  return ["starting", "transitioning", "running", "sold", "picking", "finished_finalized"].includes(status);
+}
+
+setInterval(async () => {
   const now = Date.now();
-  for (const [roomId, room] of rooms.entries()) {
-    // If room is empty and has been inactive for 2 hours, delete it
-    if (room.users.size === 0 && (now - room.lastBidAt > 7200000)) {
-      console.log(`Cleaning up inactive room: ${roomId}`);
-      if (room.timer) clearInterval(room.timer);
-      rooms.delete(roomId);
+
+  for (const [roomId, room] of Array.from(rooms.entries())) {
+    if (!room) continue;
+
+    if (room.status === "running" && room.currentPlayer && !room.finalizingBid && !room.timer) {
+      const active = activeSockets(room);
+      if (active.length === 0) continue;
+
+      const timerState = getTimerSnapshot(room);
+      if (!timerState) continue;
+
+      if (timerState.remainingMs <= 0) {
+        console.warn(`Watchdog finalizing stalled running auction in room ${roomId}`);
+        await finalizeBid(roomId);
+      } else {
+        console.warn(`Watchdog restarting missing timer in room ${roomId}`);
+        startTimer(roomId, { preserveElapsed: true });
+      }
+      continue;
+    }
+
+    if (room.status === "sold" && !room.finalizingBid && now - Number(room.phaseStartedAt || now) > 10000) {
+      console.warn(`Watchdog advancing stuck sold state in room ${roomId}`);
+      startNextPlayer(roomId);
+      continue;
+    }
+
+    if (room.status === "transitioning" && now - Number(room.phaseStartedAt || now) > 12000) {
+      console.warn(`Watchdog advancing stuck transition in room ${roomId}`);
+      startNextPlayer(roomId);
     }
   }
-}, 3600000); // Run once per hour
+}, AUCTION_STALL_WATCHDOG_INTERVAL_MS);
+
+// Room cleanup:
+// 1. Empty rooms are purged after 2 hours.
+// 2. Auction/result rooms with no activity for 30 minutes are force-closed.
+setInterval(async () => {
+  const now = Date.now();
+  let removedRoom = false;
+  const roomsToForceClose = [];
+
+  for (const [roomId, room] of Array.from(rooms.entries())) {
+    if (room.users.size === 0 && (now - room.lastBidAt > EMPTY_ROOM_RETENTION_MS)) {
+      console.log(`Cleaning up inactive room: ${roomId}`);
+      if (room.timer) clearInterval(room.timer);
+      if (room.closeTimeout) clearTimeout(room.closeTimeout);
+      rooms.delete(roomId);
+      removedRoom = true;
+      continue;
+    }
+
+    if (
+      isAuctionFlowRoomStatus(room.status) &&
+      now - Number(room.lastActivityAt || room.lastBidAt || room.createdAt || now) > INACTIVE_AUCTION_ROOM_RETENTION_MS
+    ) {
+      roomsToForceClose.push(roomId);
+    }
+  }
+
+  for (const roomId of roomsToForceClose) {
+    console.log(`Force closing stale auction room: ${roomId}`);
+    await closeRoomNow(
+      roomId,
+      "This auction room was closed after 30 minutes of inactivity.",
+      "INACTIVITY_TIMEOUT"
+    );
+    removedRoom = true;
+  }
+
+  if (removedRoom) {
+    broadcastPublicRooms();
+  }
+}, ROOM_CLEANUP_INTERVAL_MS);
 
 io.on("connection", (socket) => {
-  socket.on("join_room", async ({ roomId, username, teamName }) => {
+  socket.on("watch_public_rooms", () => {
+    socket.join(PUBLIC_ROOMS_CHANNEL);
+    socket.emit("public_rooms_update", getPublicRoomsSnapshot());
+  });
+
+  socket.on("unwatch_public_rooms", () => {
+    socket.leave(PUBLIC_ROOMS_CHANNEL);
+  });
+
+  socket.on("join_room", async ({ roomId, username, teamName, visibility, token }) => {
     if (!roomId) return;
-    const cleanName = (username || "").trim() || `Player-${socket.id.slice(-4)}`;
+    let authenticatedSession = null;
+    if (token) {
+      try {
+        authenticatedSession = verifyAuthToken(token);
+      } catch (_error) {
+        socket.emit("join_error", {
+          code: "AUTH_INVALID",
+          reason: "Your login session expired. Please sign in again.",
+        });
+        return;
+      }
+    }
+
+    let cleanName = authenticatedSession?.username || (username || "").trim() || `Player-${socket.id.slice(-4)}`;
     let cleanTeam = (teamName || "").trim() || null;
+    const requestedVisibility =
+      visibility === "public" ? "public" : visibility === "private" ? "private" : null;
     socket.data.roomId = roomId;
     socket.data.username = cleanName;
 
-    let userId = null;
+    let userId = authenticatedSession?.userId || null;
     let roomDbId = null;
+    let roomCreatorUserId = null;
+    let roomCreatedAt = null;
+    let roomSessionNumber = 1;
     let budget = 120;
     let teamId = null;
     let persistedTeam = [];
+    let room = null;
+    let existingSocketId = null;
+    let existingUser = null;
     try {
-      const [users] = await pool.query("SELECT id FROM users WHERE username = ? LIMIT 1", [cleanName]);
-      if (users.length) {
+      if (authenticatedSession?.userId) {
+        const [users] = await pool.query(
+          "SELECT id, username FROM users WHERE id = ? LIMIT 1",
+          [authenticatedSession.userId]
+        );
+        if (!users.length) {
+          socket.emit("join_error", {
+            code: "AUTH_INVALID",
+            reason: "Your login session is no longer valid. Please sign in again.",
+          });
+          return;
+        }
         userId = users[0].id;
+        cleanName = users[0].username;
       } else {
-        const [insert] = await pool.query("INSERT INTO users (username) VALUES (?) RETURNING id", [cleanName]);
-        userId = insert.insertId;
+        const [users] = await pool.query("SELECT id FROM users WHERE username = ? LIMIT 1", [cleanName]);
+        if (users.length) {
+          userId = users[0].id;
+        } else {
+          const [insert] = await pool.query("INSERT INTO users (username) VALUES (?) RETURNING id", [cleanName]);
+          userId = insert.insertId;
+        }
       }
 
-      const [insertRoom] = await pool.query(
-        `INSERT INTO rooms (room_code, host_id)
-         VALUES (?, ?)
-         ON CONFLICT (room_code) DO UPDATE SET room_code = EXCLUDED.room_code
-         RETURNING id`,
-        [roomId, userId]
-      );
-      roomDbId = insertRoom.insertId;
+      socket.data.username = cleanName;
+
+      let latestSession = await getLatestRoomSession(pool, roomId);
+      const liveRuntimeRoom = rooms.get(roomId);
+      const shouldReuseFinishedLiveSession =
+        latestSession?.status === "finished" &&
+        liveRuntimeRoom &&
+        Number(liveRuntimeRoom.dbId || 0) === Number(latestSession.id || 0) &&
+        ["picking", "finished_finalized"].includes(liveRuntimeRoom.status);
+
+      if (!latestSession || (latestSession.status === "finished" && !shouldReuseFinishedLiveSession)) {
+        if (!authenticatedSession?.userId) {
+          socket.emit("join_error", {
+            code: "AUTH_REQUIRED_CREATE",
+            reason: "Please log in or register before creating a new room.",
+          });
+          return;
+        }
+
+        latestSession = await createRoomSession(pool, roomId, userId);
+      }
+
+      roomDbId = Number(latestSession?.id || 0) || null;
+      roomCreatorUserId = Number(latestSession?.hostId || userId) || null;
+      roomCreatedAt = latestSession?.createdAt
+        ? new Date(latestSession.createdAt).getTime()
+        : Date.now();
+      roomSessionNumber = Number(latestSession?.sessionNumber || 1);
+
+      room = getRoomForSession(roomId, roomDbId, {
+        sessionNumber: roomSessionNumber,
+        creatorUserId: roomCreatorUserId,
+        createdAt: roomCreatedAt,
+        creatorName: roomCreatorUserId === userId ? cleanName : undefined,
+        visibility: roomCreatorUserId === userId ? requestedVisibility : undefined,
+      });
+      [existingSocketId, existingUser] = findRoomUser(room, userId, cleanName);
 
       // Check if auction is ongoing and user is not already registered
-      const room = getRoom(roomId, roomDbId);
-      if (room.status !== "waiting") {
-        const [existingRp] = await pool.query(
-          "SELECT id FROM room_players WHERE room_id = ? AND user_id = ? LIMIT 1",
-          [roomDbId, userId]
-        );
-        if (existingRp.length === 0) {
+      const dbSessionAlreadyStarted = latestSession?.status === "ongoing";
+      if (room.status !== "waiting" || dbSessionAlreadyStarted) {
+        const [existingRp] = roomDbId
+          ? await pool.query(
+              "SELECT id FROM room_players WHERE room_id = ? AND user_id = ? LIMIT 1",
+              [roomDbId, userId]
+            )
+          : [[]];
+        const isKnownLiveParticipant = Boolean(existingUser);
+        if (existingRp.length === 0 && !isKnownLiveParticipant) {
           socket.emit("join_error", { reason: "Auction has already started. New participants cannot join." });
           return;
         }
@@ -1206,7 +1518,11 @@ io.on("connection", (socket) => {
       console.error("DB error on join_room", formatDbError(err));
     }
 
-    const room = getRoom(roomId, roomDbId);
+    room = room || getRoomForSession(roomId, roomDbId, {
+      sessionNumber: roomSessionNumber,
+      creatorUserId: roomCreatorUserId,
+      createdAt: roomCreatedAt,
+    });
 
     // Attempt state recovery if room is fresh
     if (room.idx === 0 && room.status === "waiting") {
@@ -1236,7 +1552,9 @@ io.on("connection", (socket) => {
     }
 
     socket.data.userId = userId;
-    const [existingSocketId, existingUser] = findRoomUser(room, userId, cleanName);
+    if (!existingUser) {
+      [existingSocketId, existingUser] = findRoomUser(room, userId, cleanName);
+    }
     if (existingSocketId) {
       // Clear any pending disconnect timeout for this user
       if (room.disconnectTimeouts.has(existingSocketId)) {
@@ -1267,7 +1585,24 @@ io.on("connection", (socket) => {
       userId,
       teamName: cleanTeam || existingUser?.teamName || null,
     };
+
+    if (!room.creatorUserId && userId) {
+      syncRoomMetadata(room, {
+        creatorUserId: userId,
+        creatorName: cleanName,
+        creatorTeamName: mergedUser.teamName,
+        visibility: requestedVisibility || room.visibility,
+      });
+    } else if (room.creatorUserId && userId && room.creatorUserId === userId) {
+      syncRoomMetadata(room, {
+        creatorName: cleanName,
+        creatorTeamName: mergedUser.teamName,
+        visibility: requestedVisibility || room.visibility,
+      });
+    }
+
     room.users.set(socket.id, mergedUser);
+    touchRoomActivity(room);
 
     // A user is NOT a spectator if:
     // 1. They were already in the room (existingUser)
@@ -1293,9 +1628,11 @@ io.on("connection", (socket) => {
     broadcastPlayers(roomId);
     const results = room.status === "finished_finalized" ? Array.from(room.playing11.values()).sort((a, b) => b.score - a.score) : null;
     const winner = results?.[0]?.teamName || results?.[0]?.username || "No winner";
+    const isCreator = Boolean(room.creatorUserId && userId && room.creatorUserId === userId);
 
     socket.emit("join_ack", {
       userId,
+      username: cleanName,
       team: team,
       budget: mergedBudget,
       teamName: mergedUser.teamName,
@@ -1305,11 +1642,18 @@ io.on("connection", (socket) => {
       bidHistory: room.bidHistory || [],
       queue: getQueueState(room),
       roomStatus: room.status,
+      roomDbId: room.dbId,
+      roomSessionNumber: room.sessionNumber,
+      roomVisibility: room.visibility,
+      creatorName: room.creatorName,
+      creatorTeamName: room.creatorTeamName,
+      isCreator,
       isSpectator,
       isWithdrawn: room.withdrawnUsers.has(socket.id),
       disqualified: Array.from(room.disqualified).map((sid) => room.users.get(sid)?.teamName || room.users.get(sid)?.username).filter(Boolean),
       deadline: room.selectDeadline,
       selectionStartTime: room.selectionStartTime,
+      timer: getTimerSnapshot(room),
       results,
       winner
     });
@@ -1329,6 +1673,7 @@ io.on("connection", (socket) => {
   socket.on("voice_join", ({ roomId, username }) => {
     if (!roomId) return;
     const room = getRoom(roomId);
+    touchRoomActivity(room);
     socket.data.roomId = roomId;
     if (username) socket.data.username = username;
 
@@ -1356,6 +1701,8 @@ io.on("connection", (socket) => {
 
   socket.on("voice_signal", (payload) => {
     if (!payload.to) return;
+    const room = rooms.get(socket.data.roomId);
+    touchRoomActivity(room);
     io.to(payload.to).emit("voice_signal", {
       from: socket.id,
       fromUsername: socket.data.username || "Unknown",
@@ -1365,6 +1712,7 @@ io.on("connection", (socket) => {
   socket.on("voice_toggle_mic", (payload) => {
     const roomId = socket.data.roomId;
     if (roomId) {
+      touchRoomActivity(rooms.get(roomId));
       socket.to(roomId).emit("voice_toggle_mic", {
         socketId: socket.id,
         isMuted: payload.isMuted,
@@ -1376,29 +1724,19 @@ io.on("connection", (socket) => {
     const resolvedRoom = roomId || socket.data.roomId;
     if (!resolvedRoom) return;
     const room = getRoom(resolvedRoom);
-    if (room.status === "running") return;
+    if (["starting", "transitioning", "running"].includes(room.status)) return;
 
-    // Clear previous room data if it has a DB ID
-    if (room.dbId) {
-      try {
-        await pool.query("DELETE FROM team_players WHERE room_id = ?", [room.dbId]);
-        await pool.query("DELETE FROM unsold_players WHERE room_id = ?", [room.dbId]);
-        await pool.query("DELETE FROM bids WHERE room_id = ?", [room.dbId]);
-        await pool.query("DELETE FROM auction_state WHERE room_id = ?", [room.dbId]);
-        
-        // Also reset budgets for room_players to default
-        const [teams] = await pool.query("SELECT id, budget FROM teams");
-        const budgetMap = new Map(teams.map(t => [t.id, t.budget]));
+    const requesterUserId = Number(socket.data.userId || 0) || null;
+    const isCreator = Boolean(room.creatorUserId && requesterUserId && room.creatorUserId === requesterUserId);
+    if (!isCreator) {
+      socket.emit("start_auction_denied", { reason: "Only the room creator can start the auction." });
+      return;
+    }
 
-        const [rps] = await pool.query("SELECT id, team_id FROM room_players WHERE room_id = ?", [room.dbId]);
-        for (const rp of rps) {
-          const budget = rp.team_id ? budgetMap.get(rp.team_id) || 120 : 120;
-          await pool.query("UPDATE room_players SET budget = ? WHERE id = ?", [budget, rp.id]);
-        }
-        console.log(`Cleared previous session data for room ${resolvedRoom} (ID: ${room.dbId})`);
-      } catch (err) {
-        console.error("Failed to clear previous room data", err.message);
-      }
+    const participantCount = getActiveLobbyParticipants(room).length;
+    if (participantCount < 2) {
+      socket.emit("start_auction_denied", { reason: "At least 2 franchise owners are required to start the auction." });
+      return;
     }
 
     // Reset room state for a fresh auction
@@ -1415,7 +1753,20 @@ io.on("connection", (socket) => {
     room.highestBidderUserId = null;
     room.highestBidderName = null;
     room.finalizingBid = false;
-    room.status = "waiting";
+    room.playing11 = new Map();
+    room.disqualified = new Set();
+    room.selectionStartTime = null;
+    room.selectDeadline = null;
+    room.lastDbPersist = 0;
+    setRoomStatus(room, "starting");
+    touchRoomActivity(room);
+
+    for (const user of room.users.values()) {
+      user.team = [];
+      user.score = 0;
+    }
+
+    broadcastPublicRooms();
 
     io.to(resolvedRoom).emit("start_auction");
     // Increased to 5 seconds to ensure all users have time to navigate and join
@@ -1432,6 +1783,7 @@ io.on("connection", (socket) => {
     const roomId = socket.data.roomId;
     const room = rooms.get(roomId);
     if (!room || !room.currentPlayer || room.status !== "running") return;
+    touchRoomActivity(room);
 
     room.skipPoolUsers.add(socket.id);
     // Also mark as passed for the current player
@@ -1461,6 +1813,7 @@ io.on("connection", (socket) => {
     const roomId = socket.data.roomId;
     const room = rooms.get(roomId);
     if (!room) return;
+    touchRoomActivity(room);
 
     room.blockedUsers.add(socket.id);
     room.withdrawnUsers.add(socket.id);
@@ -1484,6 +1837,7 @@ io.on("connection", (socket) => {
     const roomId = socket.data.roomId;
     const room = rooms.get(roomId);
     if (!room || !room.currentPlayer) return;
+    touchRoomActivity(room);
     room.passedUsers.add(socket.id);
     room.bidHistory.push({
       amount: room.currentBid,
@@ -1525,6 +1879,7 @@ io.on("connection", (socket) => {
     if (!msg) return;
     const resolvedRoom = roomId || socket.data.roomId;
     if (!resolvedRoom) return;
+    touchRoomActivity(rooms.get(resolvedRoom));
     io.to(resolvedRoom).emit("chat_message", {
       user: socket.data.username,
       text: msg,
@@ -1536,6 +1891,7 @@ io.on("connection", (socket) => {
     const roomId = socket.data.roomId;
     const room = rooms.get(roomId);
     if (!room) return;
+    touchRoomActivity(room);
     const user = room.users.get(socket.id);
     if (user) {
       user.partialLineup = Array.isArray(payload?.playerIds) ? payload.playerIds.map(Number) : [];
@@ -1546,17 +1902,7 @@ io.on("connection", (socket) => {
     const roomId = socket.data.roomId;
     const room = rooms.get(roomId);
     if (!room) return;
-
-    // Check if 3 minutes (180,000 ms) have passed since selection started
-    const waitPeriod = 3 * 60 * 1000;
-    const elapsed = Date.now() - (room.selectionStartTime || 0);
-    if (elapsed < waitPeriod) {
-      const remainingWait = Math.ceil((waitPeriod - elapsed) / 1000);
-      socket.emit("playing11_error", {
-        reason: `Please wait ${remainingWait}s more to finalize your squad. Use this time to strategize!`
-      });
-      return;
-    }
+    touchRoomActivity(room);
 
     if (room.selectDeadline && Date.now() > room.selectDeadline) return;
     if (room.disqualified.has(socket.id)) {
@@ -1585,16 +1931,66 @@ io.on("connection", (socket) => {
         .catch((err) => console.error("Failed to persist playing11", formatDbError(err)));
     }
 
-    const activeIds = activeSockets(room);
-    const activeEligibleCount = activeIds.filter(sid => !room.disqualified.has(sid)).length;
+    const eligibleParticipantCount = getEligiblePlaying11Participants(room).length;
     const submissions = room.playing11.size;
 
-    if (submissions >= activeEligibleCount && submissions > 0) {
-      // All active eligible participants have submitted
+    if (eligibleParticipantCount > 0 && submissions >= eligibleParticipantCount) {
       autoFinalizePlaying11(roomId);
     } else {
-      socket.emit("playing11_ack", { ok: true, pending: activeEligibleCount - submissions });
+      socket.emit("playing11_ack", {
+        ok: true,
+        pending: Math.max(0, eligibleParticipantCount - submissions),
+      });
     }
+  });
+
+  socket.on("leave_room", ({ roomId } = {}) => {
+    const resolvedRoomId = roomId || socket.data.roomId;
+    if (!resolvedRoomId) return;
+
+    socket.leave(resolvedRoomId);
+
+    const room = rooms.get(resolvedRoomId);
+    if (!room) {
+      if (socket.data.roomId === resolvedRoomId) {
+        delete socket.data.roomId;
+      }
+      return;
+    }
+
+    room.voiceUsers.delete(socket.id);
+    if (room.disconnectTimeouts.has(socket.id)) {
+      clearTimeout(room.disconnectTimeouts.get(socket.id));
+      room.disconnectTimeouts.delete(socket.id);
+    }
+
+    const preserveResultStageParticipant =
+      room.status === "picking" || room.status === "finished_finalized";
+
+    if (preserveResultStageParticipant) {
+      if (socket.data.roomId === resolvedRoomId) {
+        delete socket.data.roomId;
+      }
+      return;
+    }
+
+    room.users.delete(socket.id);
+    room.blockedUsers.delete(socket.id);
+    room.passedUsers.delete(socket.id);
+    room.skipPoolUsers.delete(socket.id);
+    room.withdrawnUsers.delete(socket.id);
+    room.disqualified.delete(socket.id);
+    room.playing11.delete(socket.id);
+
+    if (room.highestBidder === socket.id) {
+      room.highestBidder = null;
+    }
+
+    if (socket.data.roomId === resolvedRoomId) {
+      delete socket.data.roomId;
+    }
+
+    broadcastPlayers(resolvedRoomId);
   });
 
   socket.on("disconnect", () => {
@@ -1606,15 +2002,6 @@ io.on("connection", (socket) => {
     // Remove from voice status immediately
     room.voiceUsers.delete(socket.id);
     io.to(roomId).emit("user_left_voice", { socketId: socket.id });
-
-    // If we are in "picking" stage, check if we should finalize because an active user left
-    if (room.status === "picking") {
-      const remainingActiveEligible = activeSockets(room)
-        .filter(id => id !== socket.id && !room.disqualified.has(id));
-      if (room.playing11.size >= remainingActiveEligible.length && room.playing11.size > 0) {
-        autoFinalizePlaying11(roomId);
-      }
-    }
 
     // Start a 10-minute (600,000 ms) grace period before removing the user from room users
     const timeoutId = setTimeout(() => {
@@ -1636,6 +2023,8 @@ async function bootstrap() {
   const db = getDatabaseSummary();
   try {
     await verifyDatabaseConnection();
+    await ensureAuthSchema(pool);
+    await ensureRoomSessionSchema(pool);
     console.log(`Supabase Postgres connected at ${db.host}:${db.port}/${db.database}`);
   } catch (err) {
     console.warn(

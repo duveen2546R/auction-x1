@@ -8,6 +8,7 @@ import PlayerStatusList from "../components/PlayerStatusList";
 import TeamPurses from "../components/TeamPurses";
 import Timer from "../components/Timer";
 import VoiceChat from "../components/VoiceChat";
+import { clearSession, getAuthToken, getStoredUserId } from "../session";
 
 export default function Auction() {
     const { state } = useLocation();
@@ -17,10 +18,7 @@ export default function Auction() {
     const teamName = state?.teamName || localStorage.getItem("teamName") || "";
     
     // Safety check for userId initialization
-    const storedUserId = localStorage.getItem("userId");
-    const initialUserId = storedUserId && storedUserId !== "undefined" && storedUserId !== "null" 
-        ? Number(storedUserId) 
-        : null;
+    const initialUserId = getStoredUserId();
     const [userId, setUserId] = useState(initialUserId);
 
     const slugMap = {
@@ -39,7 +37,7 @@ export default function Auction() {
     const bgSlug = useMemo(() => {
         try {
             return teamName ? slugMap[teamName.toLowerCase()] || null : null;
-        } catch (e) {
+        } catch {
             return null;
         }
     }, [teamName]);
@@ -51,7 +49,6 @@ export default function Auction() {
     const [warning, setWarning] = useState(null);
     const [hasPassed, setHasPassed] = useState(false);
     const [sidebarOpen, setSidebarOpen] = useState(true);
-    const [lastMyBid, setLastMyBid] = useState(null);
     const [eliminated, setEliminated] = useState(false);
     const [isSpectator, setIsSpectator] = useState(false);
     const [bidHistory, setBidHistory] = useState([]);
@@ -75,6 +72,12 @@ export default function Auction() {
     const [poolSkippedOverlay, setPoolSkippedOverlay] = useState(null);
     const isInitialJoin = useRef(true);
     const countdownAudio = useRef(new Audio("/countdown.mp3"));
+    const lastAuctionEventAt = useRef(Date.now());
+    const lastResyncAttemptAt = useRef(0);
+    const currentSetRef = useRef(null);
+    const eliminatedRef = useRef(false);
+    const soldOverlayRef = useRef(null);
+    const unsoldOverlayRef = useRef(null);
 
     const apiBase = useMemo(() => import.meta.env.VITE_API_URL || "http://localhost:5000", []);
 
@@ -83,6 +86,22 @@ export default function Auction() {
         if (teamName) localStorage.setItem("teamName", teamName);
         if (userId) localStorage.setItem("userId", String(userId));
     }, [username, teamName, userId]);
+
+    useEffect(() => {
+        currentSetRef.current = currentSet;
+    }, [currentSet]);
+
+    useEffect(() => {
+        eliminatedRef.current = eliminated;
+    }, [eliminated]);
+
+    useEffect(() => {
+        soldOverlayRef.current = soldOverlay;
+    }, [soldOverlay]);
+
+    useEffect(() => {
+        unsoldOverlayRef.current = unsoldOverlay;
+    }, [unsoldOverlay]);
 
     const refreshPlayerStatus = useCallback(async () => {
         if (!roomId) return;
@@ -134,10 +153,14 @@ export default function Auction() {
     }, [apiBase, roomId, userId]);
 
     useEffect(() => {
+        const countdown = countdownAudio.current;
         const joinRoom = () => {
             if (roomId) {
-                socket.emit("join_room", { roomId, username, teamName });
+                socket.emit("join_room", { roomId, username, teamName, token: getAuthToken() });
             }
+        };
+        const markAuctionEvent = () => {
+            lastAuctionEventAt.current = Date.now();
         };
 
         joinRoom();
@@ -146,12 +169,12 @@ export default function Auction() {
 
         socket.on("new_player", (player) => {
             if (!player) return;
+            markAuctionEvent();
             setHasPassed(false);
-            setLastMyBid(null);
-            countdownAudio.current.pause();
-            countdownAudio.current.currentTime = 0;
+            countdown.pause();
+            countdown.currentTime = 0;
             setCurrentPlayer(player);
-            if (player.setName && player.setName !== currentSet) {
+            if (player.setName && player.setName !== currentSetRef.current) {
                 setCurrentSet(player.setName);
                 setHasVotedSkip(false);
             }
@@ -165,6 +188,7 @@ export default function Auction() {
 
         socket.on("bid_update", (payload) => {
             if (!payload) return;
+            markAuctionEvent();
             const amount = Number(payload.amount || 0);
             const rounded = Math.round(amount * 100) / 100;
             setCurrentBid(rounded);
@@ -177,8 +201,9 @@ export default function Auction() {
 
         socket.on("player_won", (data) => {
             if (!data) return;
-            countdownAudio.current.pause();
-            countdownAudio.current.currentTime = 0;
+            markAuctionEvent();
+            countdown.pause();
+            countdown.currentTime = 0;
             const currentUserWon =
                 Number(data?.winnerUserId) === Number(userId) ||
                 (!data?.winnerUserId && data?.winner === username);
@@ -206,8 +231,7 @@ export default function Auction() {
 
             setWarning(null);
             setHasPassed(false);
-            setLastMyBid(null);
-            if (eliminated) setEliminated(true);
+            if (eliminatedRef.current) setEliminated(true);
             setBidHistory([]);
             refreshPlayerStatus();
             refreshPurses();
@@ -215,15 +239,18 @@ export default function Auction() {
 
         socket.on("set_transition", (payload) => {
             if (payload?.setName) {
+                markAuctionEvent();
                 setSetTransition(payload.setName);
                 setTimeout(() => setSetTransition(null), 4000);
             }
         });
 
         socket.on("auction_complete", (payload) => {
+            markAuctionEvent();
             setTeam(currentTeam => {
                 navigate("/result", {
                     state: {
+                        roomId,
                         team: currentTeam,
                         disqualified: Array.isArray(payload?.disqualified) ? payload.disqualified.includes(username) : false,
                         deadline: payload?.deadline || null,
@@ -235,6 +262,7 @@ export default function Auction() {
 
         socket.on("bid_warning", (payload) => {
             if (!payload) return;
+            markAuctionEvent();
             if (payload.stage === "once") setWarning(`Going once for ${payload.by || "current bid"}...`);
             if (payload.stage === "twice") setWarning(`Going twice for ${payload.by || "current bid"}...`);
         });
@@ -245,6 +273,7 @@ export default function Auction() {
 
         socket.on("timer_tick", (data) => {
             if (data) {
+                markAuctionEvent();
                 setTimeLeft({ percent: data.percent, ms: data.remainingMs });
                 
                 // Play countdown for last 5 seconds
@@ -255,17 +284,21 @@ export default function Auction() {
                     }
                 } else {
                     // Stop audio if bid increases timer or reaches 0
-                    countdownAudio.current.pause();
-                    countdownAudio.current.currentTime = 0;
+                    countdown.pause();
+                    countdown.currentTime = 0;
                 }
             }
         });
 
         socket.on("budget_update", (b) => {
-            if (typeof b?.budget === "number") setBudget(Number(b.budget));
+            if (typeof b?.budget === "number") {
+                markAuctionEvent();
+                setBudget(Number(b.budget));
+            }
         });
 
         socket.on("purses_update", (payload) => {
+            markAuctionEvent();
             const nextPurses = Array.isArray(payload?.purses) ? payload.purses : [];
             setPurses(nextPurses);
             const ownPurse = nextPurses.find((entry) => Number(entry.userId) === Number(userId));
@@ -275,18 +308,33 @@ export default function Auction() {
         });
 
         socket.on("queue_update", (q) => {
-            if (q) setQueueInfo(q);
+            if (q) {
+                markAuctionEvent();
+                setQueueInfo(q);
+            }
         });
 
         socket.on("join_error", (payload) => {
+            if (payload?.code?.startsWith("AUTH_")) {
+                clearSession();
+                navigate("/auth");
+                return;
+            }
+
             alert(payload.reason);
+            navigate("/");
+        });
+
+        socket.on("room_closed", (payload) => {
+            alert(payload?.reason || "This room was closed.");
             navigate("/");
         });
 
         socket.on("skip_update", (data) => {
             if (data) {
+                markAuctionEvent();
                 setSkipInfo(data);
-                if (data.setName && data.setName !== currentSet) {
+                if (data.setName && data.setName !== currentSetRef.current) {
                     setCurrentSet(data.setName);
                     setHasVotedSkip(false);
                 }
@@ -295,8 +343,9 @@ export default function Auction() {
 
         socket.on("pool_skipped", (payload) => {
             if (payload?.setName) {
+                markAuctionEvent();
                 // If we just sold/unsold someone, wait for that overlay to finish mostly
-                const delay = (soldOverlay || unsoldOverlay) ? 2000 : 0;
+                const delay = (soldOverlayRef.current || unsoldOverlayRef.current) ? 2000 : 0;
                 setTimeout(() => {
                     setPoolSkippedOverlay(payload.setName);
                     // Clear current bid/bidder so old values don't show during transition
@@ -310,6 +359,7 @@ export default function Auction() {
 
         socket.on("join_ack", (payload) => {
             if (!payload) return;
+            markAuctionEvent();
             
             if (!isInitialJoin.current) {
                 setReconnectOverlay(true);
@@ -317,6 +367,7 @@ export default function Auction() {
             }
             isInitialJoin.current = false;
 
+            if (payload.username) localStorage.setItem("username", payload.username);
             if (payload.userId) setUserId(payload.userId);
             if (Array.isArray(payload.team)) setTeam(payload.team);
             if (typeof payload.budget === "number") setBudget(Number(payload.budget));
@@ -331,13 +382,16 @@ export default function Auction() {
                 setEliminated(true);
             }
 
-            if (payload.roomStatus === "picking") {
+            if (payload.roomStatus === "picking" || payload.roomStatus === "finished_finalized") {
                 navigate("/result", {
                     state: {
+                        roomId,
                         team: payload.team || [],
                         disqualified: Array.isArray(payload?.disqualified) ? payload.disqualified.includes(username) : false,
                         deadline: payload?.deadline || null,
                         selectionStartTime: payload?.selectionStartTime || null,
+                        results: payload?.results || null,
+                        winner: payload?.winner || null,
                     },
                 });
                 return;
@@ -350,6 +404,11 @@ export default function Auction() {
                 setCurrentBid(bid);
                 setLastBidder(payload.lastBidder || null);
                 setWarning(null);
+                if (payload.timer) {
+                    setTimeLeft({ percent: payload.timer.percent, ms: payload.timer.remainingMs });
+                } else {
+                    setTimeLeft({ percent: 100, ms: 13000 });
+                }
             }
         });
 
@@ -361,18 +420,57 @@ export default function Auction() {
         }, 8000);
 
         return () => {
-            countdownAudio.current.pause();
+            countdown.pause();
             socket.off("connect", joinRoom);
-            socket.off();
+            socket.off("new_player");
+            socket.off("bid_update");
+            socket.off("player_won");
+            socket.off("set_transition");
+            socket.off("auction_complete");
+            socket.off("bid_warning");
+            socket.off("chat_message");
+            socket.off("timer_tick");
+            socket.off("budget_update");
+            socket.off("purses_update");
+            socket.off("queue_update");
+            socket.off("join_error");
+            socket.off("room_closed");
+            socket.off("skip_update");
+            socket.off("pool_skipped");
+            socket.off("join_ack");
             clearInterval(poll);
         };
     }, [navigate, roomId, username, teamName, refreshPlayerStatus, refreshPurses, userId]);
 
+    useEffect(() => {
+        if (!roomId || !currentPlayer) return;
+
+        const stallWatch = setInterval(() => {
+            const now = Date.now();
+            const overlayActive = Boolean(soldOverlay || unsoldOverlay || setTransition || poolSkippedOverlay);
+
+            if (overlayActive || !socket.connected) {
+                return;
+            }
+
+            if (now - lastAuctionEventAt.current < 9000) {
+                return;
+            }
+
+            if (now - lastResyncAttemptAt.current < 10000) {
+                return;
+            }
+
+            lastResyncAttemptAt.current = now;
+            socket.emit("join_room", { roomId, username, teamName, token: getAuthToken() });
+        }, 4000);
+
+        return () => clearInterval(stallWatch);
+    }, [roomId, username, teamName, currentPlayer, soldOverlay, unsoldOverlay, setTransition, poolSkippedOverlay]);
+
     const placeBid = (amount) => {
         if (eliminated || isSpectator || hasVotedSkip) return;
         socket.emit("place_bid", amount);
-        const rounded = Math.round(Number(amount) * 100) / 100;
-        setLastMyBid(rounded);
     };
 
     const withdraw = () => {

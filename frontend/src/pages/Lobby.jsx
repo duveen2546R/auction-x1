@@ -2,6 +2,20 @@ import { useEffect, useState, useMemo, useRef } from "react";
 import { useParams, useLocation, useNavigate } from "react-router-dom";
 import socket from "../socket";
 import VoiceChat from "../components/VoiceChat";
+import { clearSession, getAuthToken } from "../session";
+
+const slugMap = {
+    "royal challengers bangalore": "banglore",
+    "chennai super kings": "chennai",
+    "delhi capitals": "delhi",
+    "gujarat titans": "gujarat",
+    "sunrisers hyderabad": "hyderabad",
+    "kolkata knight riders": "kolkata",
+    "lucknow super giants": "lucknow",
+    "mumbai indians": "mumbai",
+    "punjab kings": "punjab",
+    "rajasthan royals": "rajasthan",
+};
 
 export default function Lobby() {
     const { roomId } = useParams();
@@ -9,36 +23,33 @@ export default function Lobby() {
     const navigate = useNavigate();
     const [players, setPlayers] = useState([]);
     const [isReconnected, setIsReconnected] = useState(false);
+    const [isCreator, setIsCreator] = useState(false);
+    const [roomVisibility, setRoomVisibility] = useState(state?.roomVisibility || "private");
+    const [creatorName, setCreatorName] = useState(null);
     const isInitialJoin = useRef(true);
 
     const username = state?.username || localStorage.getItem("username") || "Player";
     const teamName = state?.teamName || localStorage.getItem("teamName") || "";
+    const requestedVisibility = state?.roomVisibility;
     const [error, setError] = useState(null);
 
-    const slugMap = {
-        "royal challengers bangalore": "banglore",
-        "chennai super kings": "chennai",
-        "delhi capitals": "delhi",
-        "gujarat titans": "gujarat",
-        "sunrisers hyderabad": "hyderabad",
-        "kolkata knight riders": "kolkata",
-        "lucknow super giants": "lucknow",
-        "mumbai indians": "mumbai",
-        "punjab kings": "punjab",
-        "rajasthan royals": "rajasthan",
-    };
-    
     const bgSlug = useMemo(() => {
         try {
             return teamName ? slugMap[teamName.toLowerCase()] || null : null;
-        } catch (e) {
+        } catch {
             return null;
         }
     }, [teamName]);
 
     useEffect(() => {
         const joinRoom = () => {
-            socket.emit("join_room", { roomId, username, teamName });
+            socket.emit("join_room", {
+                roomId,
+                username,
+                teamName,
+                visibility: requestedVisibility,
+                token: getAuthToken(),
+            });
         };
 
         joinRoom();
@@ -51,6 +62,11 @@ export default function Lobby() {
                 setTimeout(() => setIsReconnected(false), 3000);
             }
             isInitialJoin.current = false;
+
+            if (payload?.username) localStorage.setItem("username", payload.username);
+            if (typeof payload?.isCreator === "boolean") setIsCreator(payload.isCreator);
+            if (payload?.roomVisibility) setRoomVisibility(payload.roomVisibility);
+            if (payload?.creatorName) setCreatorName(payload.creatorName);
 
             if (payload.isWithdrawn || (payload.roomStatus && payload.roomStatus !== "waiting")) {
                 navigate(`/auction/${roomId}`, { state: { username, teamName } });
@@ -69,14 +85,48 @@ export default function Lobby() {
             setError(`Team ${payload.team} already taken. Choose another team.`);
         });
 
+        socket.on("start_auction_denied", (payload) => {
+            setError(payload?.reason || "You cannot start this auction.");
+        });
+
+        socket.on("join_error", (payload) => {
+            if (payload?.code === "AUTH_INVALID") {
+                clearSession();
+                navigate("/auth");
+                return;
+            }
+
+            if (payload?.code === "AUTH_REQUIRED_CREATE") {
+                navigate("/auth");
+                return;
+            }
+
+            setError(payload?.reason || "Unable to join this room.");
+        });
+
         return () => {
             socket.off("connect", joinRoom);
             socket.off("join_ack");
             socket.off("players_update");
             socket.off("start_auction");
             socket.off("team_taken");
+            socket.off("start_auction_denied");
+            socket.off("join_error");
         };
-    }, [navigate, roomId, username, teamName]);
+    }, [navigate, requestedVisibility, roomId, username, teamName]);
+
+    const creatorLabel = creatorName || players.find((player) => player.isCreator)?.username || "Room Creator";
+    const startDisabled = players.length < 2 || !isCreator;
+    const startButtonLabel = !isCreator
+        ? "HOST CONTROLS ONLY"
+        : players.length < 2
+            ? "AWAITING MORE OWNERS"
+            : "INITIATE AUCTION SESSION";
+
+    const handleStartAuction = () => {
+        setError(null);
+        socket.emit("start_auction", roomId);
+    };
 
     return (
         <div
@@ -107,6 +157,18 @@ export default function Lobby() {
                             <p className="text-[10px] text-slate-500 font-bold uppercase tracking-[0.2em]">
                                 Waiting for franchise owners to assemble
                             </p>
+                            <div className="flex flex-wrap items-center justify-center gap-2">
+                                <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[10px] font-black uppercase tracking-[0.2em] text-white">
+                                    {roomVisibility === "public" ? "Public Room" : "Private Room"}
+                                </span>
+                                <span className={`rounded-full border px-3 py-1 text-[10px] font-black uppercase tracking-[0.2em] ${
+                                    isCreator
+                                        ? "border-accent/30 bg-accent/10 text-accent"
+                                        : "border-white/10 bg-white/5 text-slate-400"
+                                }`}>
+                                    {isCreator ? "You Are The Host" : `Host: ${creatorLabel}`}
+                                </span>
+                            </div>
                         </div>
                     </div>
                 </header>
@@ -144,9 +206,16 @@ export default function Lobby() {
                                             <span className="text-white font-bold text-sm uppercase italic tracking-tight">
                                                 {p.username} {p.username === username && <span className="text-[10px] text-accent ml-2">(YOU)</span>}
                                             </span>
-                                            <span className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">Franchise Owner</span>
+                                            <span className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">
+                                                {p.isCreator ? "Room Creator" : "Franchise Owner"}
+                                            </span>
                                         </div>
                                         <div className="flex items-center gap-4">
+                                            {p.isCreator && (
+                                                <span className="rounded-full border border-accent/20 bg-accent/10 px-2 py-1 text-[9px] font-black uppercase tracking-[0.2em] text-accent">
+                                                    Host
+                                                </span>
+                                            )}
                                             <span className="text-xs font-black text-slate-400 uppercase italic tracking-wide">{p.team || "Independent"}</span>
                                             <div className="w-2 h-2 rounded-full bg-emerald-500"></div>
                                         </div>
@@ -163,14 +232,19 @@ export default function Lobby() {
                         <div className="relative z-10 pt-4">
                             <button
                                 className="primary-btn w-full !py-4 !rounded-xl text-sm font-black tracking-[0.2em] uppercase italic disabled:opacity-30 disabled:grayscale transition-all"
-                                disabled={players.length < 2}
-                                onClick={() => socket.emit("start_auction", roomId)}
+                                disabled={startDisabled}
+                                onClick={handleStartAuction}
                             >
-                                {players.length < 2 ? "AWAITING MORE OWNERS" : "INITIATE AUCTION SESSION"}
+                                {startButtonLabel}
                             </button>
                             {players.length < 2 && (
                                 <p className="mt-4 text-[10px] text-slate-500 font-bold uppercase tracking-widest text-center italic">
                                     Minimum 2 franchises required to begin
+                                </p>
+                            )}
+                            {!isCreator && (
+                                <p className="mt-4 text-[10px] text-slate-500 font-bold uppercase tracking-widest text-center italic">
+                                    Only {creatorLabel} can initialize the auction
                                 </p>
                             )}
                         </div>
@@ -191,4 +265,3 @@ export default function Lobby() {
         </div>
     );
 }
-

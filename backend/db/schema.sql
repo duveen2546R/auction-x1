@@ -1,16 +1,19 @@
 CREATE TABLE IF NOT EXISTS users (
   id SERIAL PRIMARY KEY,
   username VARCHAR(50) NOT NULL UNIQUE,
+  password_hash TEXT,
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS rooms (
   id SERIAL PRIMARY KEY,
-  room_code VARCHAR(10) UNIQUE,
+  room_code VARCHAR(10) NOT NULL,
+  session_number INT NOT NULL DEFAULT 1,
   host_id INT REFERENCES users(id) ON DELETE SET NULL,
   status TEXT DEFAULT 'waiting' CHECK (status IN ('waiting', 'ongoing', 'finished')),
   max_players INT DEFAULT 10,
-  created_at TIMESTAMPTZ DEFAULT NOW()
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE (room_code, session_number)
 );
 
 CREATE TABLE IF NOT EXISTS teams (

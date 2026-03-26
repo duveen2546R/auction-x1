@@ -1,12 +1,17 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import socket from "../socket";
+import { clearSession, getAuthToken, getStoredUsername } from "../session";
 
 export default function Home() {
-    const [username, setUsername] = useState(localStorage.getItem("username") || "");
+    const [username, setUsername] = useState(getStoredUsername());
     const [roomCode, setRoomCode] = useState("");
     const [teamName, setTeamName] = useState(localStorage.getItem("teamName") || "");
+    const [roomVisibility, setRoomVisibility] = useState("private");
     const [teams, setTeams] = useState([]);
     const [players, setPlayers] = useState([]);
+    const [publicRooms, setPublicRooms] = useState([]);
+    const [sessionToken, setSessionToken] = useState(() => getAuthToken());
     const navigate = useNavigate();
 
     useEffect(() => {
@@ -21,7 +26,28 @@ export default function Home() {
             .catch(() => setPlayers([]));
     }, []);
 
+    useEffect(() => {
+        const handlePublicRoomsUpdate = (rooms) => {
+            setPublicRooms(Array.isArray(rooms) ? rooms : []);
+        };
+
+        const watchPublicRooms = () => {
+            socket.emit("watch_public_rooms");
+        };
+
+        watchPublicRooms();
+        socket.on("connect", watchPublicRooms);
+        socket.on("public_rooms_update", handlePublicRoomsUpdate);
+
+        return () => {
+            socket.off("connect", watchPublicRooms);
+            socket.off("public_rooms_update", handlePublicRoomsUpdate);
+            socket.emit("unwatch_public_rooms");
+        };
+    }, []);
+
     const persistName = (name) => {
+        if (sessionToken) return;
         setUsername(name);
         localStorage.setItem("username", name);
     };
@@ -31,17 +57,38 @@ export default function Home() {
         localStorage.setItem("teamName", team);
     };
 
+    const accountUsername = getStoredUsername();
+    const activeUsername = sessionToken ? accountUsername : username;
+    const isAuthenticated = Boolean(sessionToken);
+
     const createRoom = () => {
         const roomId = Math.floor(100000 + Math.random() * 900000);
-        navigate(`/lobby/${roomId}`, { state: { username, teamName } });
+        navigate(`/lobby/${roomId}`, { state: { username: activeUsername, teamName, roomVisibility } });
     };
 
-    const joinRoom = () => {
-        if (!roomCode) return;
-        navigate(`/lobby/${roomCode}`, { state: { username, teamName } });
+    const handleCreateRoomClick = () => {
+        if (!isAuthenticated) {
+            navigate("/auth");
+            return;
+        }
+
+        createRoom();
     };
 
-    const canProceed = username && teamName;
+    const joinRoom = (nextRoomId = roomCode) => {
+        const targetRoomId = String(nextRoomId || "").trim();
+        if (!targetRoomId) return;
+        navigate(`/lobby/${targetRoomId}`, { state: { username: activeUsername, teamName } });
+    };
+
+    const handleLogout = () => {
+        clearSession();
+        setSessionToken("");
+        setUsername("");
+        navigate("/auth");
+    };
+
+    const canProceed = activeUsername && teamName;
 
     const grouped = useMemo(() => {
         const g = { batsman: [], bowler: [], allrounder: [], wicketkeeper: [] };
@@ -95,6 +142,37 @@ export default function Home() {
                             The Ultimate IPL Franchise Simulator
                         </p>
                     </div>
+                    <div className="flex flex-wrap items-center justify-center gap-3">
+                        {isAuthenticated ? (
+                            <>
+                                <span className="rounded-full border border-emerald-500/20 bg-emerald-500/10 px-4 py-2 text-[10px] font-black uppercase tracking-[0.2em] text-emerald-300">
+                                    Signed In As {activeUsername}
+                                </span>
+                                <button
+                                    type="button"
+                                    onClick={() => navigate("/history")}
+                                    className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-[10px] font-black uppercase tracking-[0.2em] text-white transition hover:border-accent/30 hover:text-accent"
+                                >
+                                    Recent Rooms
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={handleLogout}
+                                    className="rounded-full border border-white/10 bg-transparent px-4 py-2 text-[10px] font-black uppercase tracking-[0.2em] text-slate-400 transition hover:border-rose-500/30 hover:text-rose-400"
+                                >
+                                    Logout
+                                </button>
+                            </>
+                        ) : (
+                            <button
+                                type="button"
+                                onClick={() => navigate("/auth")}
+                                className="rounded-full border border-accent/30 bg-accent/10 px-4 py-2 text-[10px] font-black uppercase tracking-[0.2em] text-accent transition hover:bg-accent/20"
+                            >
+                                Login / Register
+                            </button>
+                        )}
+                    </div>
                 </header>
 
                 <div className="grid lg:grid-cols-[1fr_400px] gap-8">
@@ -113,9 +191,15 @@ export default function Home() {
                                             <input
                                                 className="w-full rounded-xl border border-white/5 bg-white/5 px-4 py-3 text-sm text-white placeholder-slate-700 focus:outline-none focus:ring-2 focus:ring-accent transition-all"
                                                 placeholder="Enter owner name..."
-                                                value={username}
+                                                value={activeUsername}
                                                 onChange={(e) => persistName(e.target.value)}
+                                                disabled={isAuthenticated}
                                             />
+                                            {isAuthenticated && (
+                                                <p className="mt-2 text-[10px] font-bold uppercase tracking-widest text-emerald-300">
+                                                    Account username is locked to your signed-in profile.
+                                                </p>
+                                            )}
                                         </div>
                                         <div className="flex flex-col">
                                             <label className="text-[10px] text-slate-400 font-black uppercase tracking-[0.2em] mb-2">Select Franchise</label>
@@ -130,17 +214,49 @@ export default function Home() {
                                                 ))}
                                             </select>
                                         </div>
+                                        <div className="space-y-3">
+                                            <div className="flex items-center justify-between">
+                                                <label className="text-[10px] text-slate-400 font-black uppercase tracking-[0.2em]">Room Access</label>
+                                                <span className="text-[9px] font-black uppercase tracking-[0.2em] text-slate-500">
+                                                    {roomVisibility === "public" ? "Visible in lobby list" : "Invite only"}
+                                                </span>
+                                            </div>
+                                            <div className="grid grid-cols-2 gap-3">
+                                                {["private", "public"].map((visibility) => {
+                                                    const isActive = roomVisibility === visibility;
+                                                    return (
+                                                        <button
+                                                            key={visibility}
+                                                            type="button"
+                                                            onClick={() => setRoomVisibility(visibility)}
+                                                            className={`rounded-xl border px-4 py-3 text-xs font-black uppercase tracking-[0.2em] transition-all ${
+                                                                isActive
+                                                                    ? "border-accent bg-accent/15 text-white"
+                                                                    : "border-white/5 bg-white/5 text-slate-400 hover:border-white/15 hover:text-white"
+                                                            }`}
+                                                        >
+                                                            {visibility}
+                                                        </button>
+                                                    );
+                                                })}
+                                            </div>
+                                        </div>
                                     </div>
                                     <button
                                         className="primary-btn w-full !py-4 !rounded-xl text-sm font-black tracking-[0.2em] uppercase italic disabled:opacity-30 transition-all"
-                                        onClick={createRoom}
-                                        disabled={!canProceed}
+                                        onClick={handleCreateRoomClick}
+                                        disabled={isAuthenticated ? !canProceed : false}
                                     >
-                                        CREATE NEW SESSION
+                                        {isAuthenticated ? "CREATE NEW SESSION" : "LOGIN TO CREATE SESSION"}
                                     </button>
+                                    {!isAuthenticated && (
+                                        <p className="text-[10px] font-bold uppercase tracking-widest text-amber-300">
+                                            Room creation is available only for logged-in accounts so the full room history can be saved.
+                                        </p>
+                                    )}
                                 </div>
 
-                                <div className="flex flex-col justify-between p-6 bg-white/5 rounded-2xl border border-white/5 border-dashed">
+                                <div className="p-6 bg-white/5 rounded-2xl border border-white/5 border-dashed space-y-6">
                                     <div className="space-y-4">
                                         <label className="text-[10px] text-slate-400 font-black uppercase tracking-[0.2em]">Join Existing Arena</label>
                                         <input
@@ -149,14 +265,67 @@ export default function Home() {
                                             value={roomCode}
                                             onChange={(e) => setRoomCode(e.target.value)}
                                         />
+                                        <button
+                                            className="primary-btn w-full !py-4 !rounded-xl text-sm font-black tracking-[0.2em] uppercase italic disabled:opacity-30 transition-all"
+                                            onClick={() => joinRoom()}
+                                            disabled={!canProceed || !roomCode}
+                                        >
+                                            ENTER ROOM
+                                        </button>
                                     </div>
-                                    <button
-                                        className="primary-btn w-full !py-4 !rounded-xl text-sm font-black tracking-[0.2em] uppercase italic disabled:opacity-30 transition-all mt-4"
-                                        onClick={joinRoom}
-                                        disabled={!canProceed || !roomCode}
-                                    >
-                                        ENTER ROOM
-                                    </button>
+
+                                    <div className="border-t border-white/5 pt-6 space-y-4">
+                                        <div className="flex items-center justify-between gap-3">
+                                            <div>
+                                                <h3 className="text-[10px] font-black uppercase tracking-[0.2em] text-white italic">Live Public Lobbies</h3>
+                                                <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest mt-1">
+                                                    Visible only while hosts are waiting in the lobby
+                                                </p>
+                                            </div>
+                                            <span className="rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2.5 py-1 text-[10px] font-black uppercase tracking-widest text-emerald-300">
+                                                {publicRooms.length} Live
+                                            </span>
+                                        </div>
+
+                                        <div className="space-y-3 max-h-[240px] overflow-y-auto pr-1 custom-scrollbar">
+                                            {publicRooms.map((room) => (
+                                                <button
+                                                    key={room.roomId}
+                                                    type="button"
+                                                    onClick={() => joinRoom(room.roomId)}
+                                                    disabled={!canProceed}
+                                                    className="w-full rounded-2xl border border-white/5 bg-black/20 p-4 text-left transition hover:border-accent/30 hover:bg-white/5 disabled:cursor-not-allowed disabled:opacity-50"
+                                                >
+                                                    <div className="flex items-center justify-between gap-3">
+                                                        <span className="text-xs font-black uppercase tracking-[0.2em] text-white italic">
+                                                            Room {room.roomId}
+                                                        </span>
+                                                        <span className="text-[10px] font-black uppercase tracking-widest text-accent">
+                                                            {room.participantCount} Owners
+                                                        </span>
+                                                    </div>
+                                                    <p className="mt-2 text-[10px] font-bold uppercase tracking-widest text-slate-400">
+                                                        Host: {room.creatorName || "Host"}
+                                                        {room.creatorTeamName ? ` · ${room.creatorTeamName}` : ""}
+                                                    </p>
+                                                </button>
+                                            ))}
+
+                                            {publicRooms.length === 0 && (
+                                                <div className="rounded-2xl border border-white/5 bg-black/20 px-4 py-6 text-center">
+                                                    <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-500 italic">
+                                                        No public lobbies waiting right now
+                                                    </p>
+                                                </div>
+                                            )}
+                                        </div>
+
+                                        {!canProceed && publicRooms.length > 0 && (
+                                            <p className="text-[10px] font-bold uppercase tracking-widest text-amber-300">
+                                                Add your owner name and franchise first to join a live public lobby.
+                                            </p>
+                                        )}
+                                    </div>
                                 </div>
                             </div>
                         </section>
