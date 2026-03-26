@@ -113,12 +113,31 @@ export default function Result() {
         if (!deadline) return;
         const tick = () => {
             const ms = deadline - Date.now();
-            setRemaining(ms > 0 ? Math.ceil(ms / 1000) : 0);
+            const rounded = ms > 0 ? Math.ceil(ms / 1000) : 0;
+            setRemaining(rounded);
+
+            // Auto-submit when time is up
+            if (ms <= 0 && !submitting && !results && !isDisqualified) {
+                setSubmitting(true);
+                socket.emit("submit_playing11", { playerIds: selected });
+            }
         };
         tick();
         const interval = setInterval(tick, 1000);
         return () => clearInterval(interval);
-    }, [deadline]);
+    }, [deadline, submitting, results, isDisqualified, selected]);
+
+    useEffect(() => {
+        const onJoinAck = (payload) => {
+            if (payload.results) setResults(payload.results);
+            if (payload.winner) setWinner(payload.winner);
+            if (payload.roomStatus === "finished_finalized") {
+                setSubmitting(false);
+            }
+        };
+        socket.on("join_ack", onJoinAck);
+        return () => socket.off("join_ack", onJoinAck);
+    }, []);
 
     useEffect(() => {
         if (!selectionStartTime) return;
@@ -365,7 +384,7 @@ export default function Result() {
                                             <span className="text-[10px] text-accent font-black uppercase tracking-widest">Current Winner</span>
                                             <h3 className="text-2xl font-black text-white italic uppercase tracking-tight truncate">{winner}</h3>
                                         </div>
-                                        <div className="space-y-3 overflow-y-auto max-h-[500px] pr-2 custom-scrollbar">
+                                        <div className="space-y-3 overflow-y-auto max-h-[800px] pr-2 custom-scrollbar">
                                             {results.map((r, idx) => (
                                                 <div key={idx} className="flex justify-between items-center bg-white/5 border border-white/5 p-4 rounded-xl hover:bg-white/10 transition">
                                                     <div className="flex flex-col">

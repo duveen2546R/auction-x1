@@ -146,9 +146,15 @@ export default function Auction() {
 
         socket.on("new_player", (player) => {
             if (!player) return;
+            setHasPassed(false);
+            setLastMyBid(null);
             countdownAudio.current.pause();
             countdownAudio.current.currentTime = 0;
             setCurrentPlayer(player);
+            if (player.setName && player.setName !== currentSet) {
+                setCurrentSet(player.setName);
+                setHasVotedSkip(false);
+            }
             setCurrentBid(Number(player.base_price || 0));
             setLastBidder(null);
             setWarning(null);
@@ -293,6 +299,10 @@ export default function Auction() {
                 const delay = (soldOverlay || unsoldOverlay) ? 2000 : 0;
                 setTimeout(() => {
                     setPoolSkippedOverlay(payload.setName);
+                    // Clear current bid/bidder so old values don't show during transition
+                    setLastBidder(null);
+                    setCurrentBid(0);
+                    setWarning(null);
                     setTimeout(() => setPoolSkippedOverlay(null), 3500);
                 }, delay);
             }
@@ -380,7 +390,7 @@ export default function Auction() {
     };
 
     const passPlayer = () => {
-        if (hasPassed || isSpectator) return;
+        if (hasPassed || hasVotedSkip || isSpectator) return;
         setHasPassed(true);
         setPassOverlay(true);
         socket.emit("pass_player");
@@ -391,7 +401,13 @@ export default function Auction() {
         if (isSpectator || hasVotedSkip) return;
         const confirmed = window.confirm("Are you sure you want to skip the ENTIRE current pool? Once you vote skip, you cannot bid on any players in this set, and the skip will take effect after the current player is finalized.");
         if (!confirmed) return;
+        
         setHasVotedSkip(true);
+        // Also automatically pass on current player when skipping pool
+        setHasPassed(true);
+        setPassOverlay(true);
+        setTimeout(() => setPassOverlay(false), 1500);
+        
         socket.emit("skip_pool");
     };
 
