@@ -113,6 +113,34 @@ export async function verifyPassword(password, storedHash) {
   );
 }
 
+export function generatePasswordResetToken() {
+  return crypto.randomBytes(32).toString("hex");
+}
+
+export function hashPasswordResetToken(token) {
+  return crypto.createHash("sha256").update(String(token || "").trim()).digest("hex");
+}
+
 export async function ensureAuthSchema(pool) {
   await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash TEXT");
+  await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS email VARCHAR(255)");
+  await pool.query(
+    "CREATE UNIQUE INDEX IF NOT EXISTS users_email_unique_idx ON users (LOWER(email)) WHERE email IS NOT NULL"
+  );
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS password_reset_tokens (
+      id SERIAL PRIMARY KEY,
+      user_id INT REFERENCES users(id) ON DELETE CASCADE,
+      token_hash TEXT NOT NULL,
+      expires_at TIMESTAMPTZ NOT NULL,
+      used_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+  await pool.query(
+    "CREATE INDEX IF NOT EXISTS password_reset_tokens_user_id_idx ON password_reset_tokens (user_id)"
+  );
+  await pool.query(
+    "CREATE UNIQUE INDEX IF NOT EXISTS password_reset_tokens_token_hash_idx ON password_reset_tokens (token_hash)"
+  );
 }

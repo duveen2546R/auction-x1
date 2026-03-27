@@ -5,6 +5,7 @@ import { clearSession, getAuthToken } from "../session";
 export default function Auth() {
   const [isLogin, setIsLogin] = useState(true);
   const [username, setUsername] = useState("");
+  const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
@@ -48,7 +49,7 @@ export default function Auth() {
       const res = await fetch(`${apiBase}${endpoint}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username, password }),
+        body: JSON.stringify({ username, password, email }),
       });
 
       const data = await res.json();
@@ -93,6 +94,21 @@ export default function Auth() {
                 onChange={(e) => setUsername(e.target.value)}
               />
             </div>
+            {!isLogin && (
+              <div>
+                <label className="text-[10px] text-slate-400 font-black uppercase tracking-[0.2em] mb-2 block">
+                  Email
+                </label>
+                <input
+                  type="email"
+                  required
+                  className="w-full rounded-xl border border-white/5 bg-white/5 px-4 py-3 text-sm text-white placeholder-slate-700 focus:outline-none focus:ring-2 focus:ring-accent transition-all"
+                  placeholder="Enter email"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                />
+              </div>
+            )}
             <div>
               <label className="text-[10px] text-slate-400 font-black uppercase tracking-[0.2em] mb-2 block">
                 Password
@@ -152,6 +168,7 @@ export default function Auth() {
               onClick={() => {
                 setIsLogin(!isLogin);
                 setError("");
+                setEmail("");
                 setPassword("");
                 setConfirmPassword("");
               }}
@@ -160,6 +177,17 @@ export default function Auth() {
               {isLogin ? "Don't have an account? Sign Up" : "Already registered? Login"}
             </button>
           </div>
+          {isLogin && (
+            <div className="text-center">
+              <button
+                type="button"
+                onClick={() => navigate("/forgot-password")}
+                className="text-[10px] font-black text-accent hover:text-white uppercase tracking-[0.2em] transition-all"
+              >
+                Forgot Password?
+              </button>
+            </div>
+          )}
         </form>
 
         <div className="border-t border-white/5 pt-6 text-center">

@@ -1,6 +1,7 @@
 CREATE TABLE IF NOT EXISTS users (
   id SERIAL PRIMARY KEY,
   username VARCHAR(50) NOT NULL UNIQUE,
+  email VARCHAR(255) UNIQUE,
   password_hash TEXT,
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -79,4 +80,13 @@ CREATE TABLE IF NOT EXISTS playing11 (
   user_id INT REFERENCES users(id) ON DELETE CASCADE,
   lineup JSONB,
   score DECIMAL(10,2)
+);
+
+CREATE TABLE IF NOT EXISTS password_reset_tokens (
+  id SERIAL PRIMARY KEY,
+  user_id INT REFERENCES users(id) ON DELETE CASCADE,
+  token_hash TEXT NOT NULL UNIQUE,
+  expires_at TIMESTAMPTZ NOT NULL,
+  used_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ DEFAULT NOW()
 );
