@@ -1,4 +1,4 @@
-import React from "react";
+import { useCallback } from "react";
 
 export default function BidPanel({ currentBid, step, budget, onBid, onWithdraw, onPass, isPassed = false, isEliminated = false, isSpectator = false, hasBidder = false }) {
     const suggested = hasBidder ? (Number(currentBid) + Number(step)) : Number(currentBid);
@@ -9,6 +9,11 @@ export default function BidPanel({ currentBid, step, budget, onBid, onWithdraw, 
     };
 
     const isInteractionDisabled = isPassed || isEliminated || isSpectator;
+
+    const handlePassDoubleClick = useCallback(() => {
+        if (isInteractionDisabled) return;
+        onPass();
+    }, [isInteractionDisabled, onPass]);
 
     return (
         <div className="flex flex-col gap-6 p-4">
@@ -27,7 +32,11 @@ export default function BidPanel({ currentBid, step, budget, onBid, onWithdraw, 
                     <button className="ghost-btn px-6 py-4 min-w-[120px]" onClick={onWithdraw} disabled={isEliminated || isSpectator}>
                         Withdraw
                     </button>
-                    <button className="ghost-btn px-6 py-4 min-w-[100px]" onClick={onPass} disabled={isPassed || isEliminated || isSpectator}>
+                    <button
+                        className="ghost-btn px-6 py-4 min-w-[100px]"
+                        onDoubleClick={handlePassDoubleClick}
+                        disabled={isPassed || isEliminated || isSpectator}
+                    >
                         Pass
                     </button>
                 </div>

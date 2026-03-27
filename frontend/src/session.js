@@ -18,4 +18,5 @@ export function clearSession() {
     localStorage.removeItem("token");
     localStorage.removeItem("userId");
     localStorage.removeItem("username");
+    localStorage.removeItem("activeRoomId");
 }

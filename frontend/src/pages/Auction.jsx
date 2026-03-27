@@ -78,6 +78,7 @@ export default function Auction() {
     const eliminatedRef = useRef(false);
     const soldOverlayRef = useRef(null);
     const unsoldOverlayRef = useRef(null);
+    const hasJoinAckRef = useRef(false);
 
     const apiBase = useMemo(() => import.meta.env.VITE_API_URL || "http://localhost:5000", []);
 
@@ -85,7 +86,8 @@ export default function Auction() {
         if (username) localStorage.setItem("username", username);
         if (teamName) localStorage.setItem("teamName", teamName);
         if (userId) localStorage.setItem("userId", String(userId));
-    }, [username, teamName, userId]);
+        if (roomId) localStorage.setItem("activeRoomId", roomId);
+    }, [username, teamName, userId, roomId]);
 
     useEffect(() => {
         currentSetRef.current = currentSet;
@@ -156,7 +158,7 @@ export default function Auction() {
         const countdown = countdownAudio.current;
         const joinRoom = () => {
             if (roomId) {
-                socket.emit("join_room", { roomId, username, teamName, token: getAuthToken() });
+                socket.emit("join_room", { roomId, username, teamName, token: getAuthToken(), intent: "resume" });
             }
         };
         const markAuctionEvent = () => {
@@ -322,11 +324,22 @@ export default function Auction() {
                 return;
             }
 
+            if (
+                payload?.reason?.includes("Auction has already started") &&
+                hasJoinAckRef.current
+            ) {
+                refreshPlayerStatus();
+                refreshPurses();
+                return;
+            }
+
+            localStorage.removeItem("activeRoomId");
             alert(payload.reason);
             navigate("/");
         });
 
         socket.on("room_closed", (payload) => {
+            localStorage.removeItem("activeRoomId");
             alert(payload?.reason || "This room was closed.");
             navigate("/");
         });
@@ -361,6 +374,7 @@ export default function Auction() {
         socket.on("join_ack", (payload) => {
             if (!payload) return;
             markAuctionEvent();
+            hasJoinAckRef.current = true;
             
             if (!isInitialJoin.current) {
                 setReconnectOverlay(true);
@@ -463,7 +477,7 @@ export default function Auction() {
             }
 
             lastResyncAttemptAt.current = now;
-            socket.emit("join_room", { roomId, username, teamName, token: getAuthToken() });
+            socket.emit("join_room", { roomId, username, teamName, token: getAuthToken(), intent: "resume" });
         }, 4000);
 
         return () => clearInterval(stallWatch);
@@ -521,11 +535,13 @@ export default function Auction() {
     const totalCount = Number(queueInfo.total ?? 0);
     const bidLeaderLength = String(lastBidder || "").trim().length;
     const bidLeaderTextClass =
-        bidLeaderLength > 28
-            ? "text-[1.65rem] md:text-[2rem]"
-            : bidLeaderLength > 20
-                ? "text-[2rem] md:text-[2.4rem]"
-                : "text-4xl md:text-5xl";
+        bidLeaderLength > 32
+            ? "text-[1.35rem] md:text-[1.75rem]"
+            : bidLeaderLength > 24
+                ? "text-[1.75rem] md:text-[2.1rem]"
+                : bidLeaderLength > 16
+                    ? "text-[2.15rem] md:text-[2.7rem]"
+                    : "text-4xl md:text-5xl";
 
     return (
         <div
@@ -642,8 +658,8 @@ export default function Auction() {
                                 <div className="space-y-4">
                                     <div className="flex flex-col">
                                         <span className="text-[10px] text-slate-400 font-black uppercase tracking-[0.2em] mb-2">Current Bid Leader</span>
-                                        <div className="flex items-end min-h-[88px] md:min-h-[104px] w-full max-w-[34rem]">
-                                            <h3 className={`${bidLeaderTextClass} font-black text-white italic uppercase tracking-tight leading-[0.88] break-words w-full`}>
+                                        <div className="flex items-center h-[92px] md:h-[116px] w-full md:w-[34rem] md:max-w-[34rem] overflow-hidden">
+                                            <h3 className={`${bidLeaderTextClass} font-black text-white italic uppercase tracking-tight leading-[0.9] break-words w-full max-w-full`}>
                                                 {lastBidder || <span className="text-slate-700">NO BIDS</span>}
                                             </h3>
                                         </div>

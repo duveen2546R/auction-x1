@@ -84,6 +84,31 @@ function parseLineupIds(lineup) {
 
 router.get("/health", (_req, res) => res.json({ ok: true }));
 
+router.get("/rooms/:roomId/joinability", async (req, res) => {
+  const roomKey = String(req.params.roomId || "").trim();
+  if (!roomKey) {
+    return res.status(400).json({ error: "roomId is required" });
+  }
+
+  try {
+    const room = await resolveRoom(pool, roomKey);
+    if (!room) {
+      return res.json({ exists: false, status: null });
+    }
+
+    const exists = room.status !== "finished" || isRuntimeRoomOpenable(roomKey, room.id);
+    return res.json({
+      exists,
+      status: exists ? room.status : "closed",
+      roomId: Number(room.id),
+      roomCode: room.roomCode,
+    });
+  } catch (err) {
+    console.error("Failed to check room joinability", formatDbError(err));
+    return res.status(500).json({ error: "Failed to verify room code" });
+  }
+});
+
 router.get("/players", async (_req, res) => {
   const players = await loadPlayers();
   res.json(players);

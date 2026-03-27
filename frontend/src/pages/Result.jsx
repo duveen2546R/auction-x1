@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import socket from "../socket";
+import { getAuthToken } from "../session";
 
 function validateLineup(team, ids) {
     const lineup = team.filter((p) => ids.includes(p.id));
@@ -44,10 +45,10 @@ function validateLineup(team, ids) {
 export default function Result() {
     const { state } = useLocation();
     const navigate = useNavigate();
-    const roomId = state?.roomId || "";
-    const team = useMemo(() => (Array.isArray(state?.team) ? state.team : []), [state?.team]);
-    const isDisqualified = state?.disqualified;
-    const deadline = state?.deadline || null;
+    const roomId = state?.roomId || localStorage.getItem("activeRoomId") || "";
+    const [team, setTeam] = useState(Array.isArray(state?.team) ? state.team : []);
+    const [isDisqualified, setIsDisqualified] = useState(Boolean(state?.disqualified));
+    const [deadline, setDeadline] = useState(state?.deadline || null);
     const [selected, setSelected] = useState([]);
     const [submitting, setSubmitting] = useState(false);
     const [locked, setLocked] = useState(false);
@@ -55,6 +56,7 @@ export default function Result() {
     const [results, setResults] = useState(Array.isArray(state?.results) ? state.results : null);
     const [winner, setWinner] = useState(state?.winner || null);
     const [remaining, setRemaining] = useState(null);
+    const username = localStorage.getItem("username") || "You";
 
     const teamName = localStorage.getItem("teamName") || "";
     const slugMap = {
@@ -79,6 +81,32 @@ export default function Result() {
     }, [teamName]);
 
     useEffect(() => {
+        if (roomId) {
+            localStorage.setItem("activeRoomId", roomId);
+        }
+    }, [roomId]);
+
+    useEffect(() => {
+        if (!roomId) return;
+        const joinRoom = () => {
+            socket.emit("join_room", {
+                roomId,
+                username,
+                teamName,
+                token: getAuthToken(),
+                intent: "resume",
+            });
+        };
+
+        joinRoom();
+        socket.on("connect", joinRoom);
+
+        return () => {
+            socket.off("connect", joinRoom);
+        };
+    }, [roomId, username, teamName]);
+
+    useEffect(() => {
         const onResults = (payload) => {
             setResults(payload.results);
             setWinner(payload.winner);
@@ -90,6 +118,7 @@ export default function Result() {
             setSubmitting(false);
         };
         const onRoomClosed = (payload) => {
+            localStorage.removeItem("activeRoomId");
             if (payload?.code !== "RESULT_TIMER_ENDED") {
                 alert(payload?.reason || "This room was closed.");
             }
@@ -136,11 +165,21 @@ export default function Result() {
 
     useEffect(() => {
         const onJoinAck = (payload) => {
+            if (Array.isArray(payload.team)) setTeam(payload.team);
             if (payload.results) setResults(payload.results);
             if (payload.winner) setWinner(payload.winner);
+            if (payload.deadline) setDeadline(payload.deadline);
+            if (Array.isArray(payload.disqualified)) {
+                setIsDisqualified(payload.disqualified.includes(teamName) || payload.disqualified.includes(username));
+            }
             if (payload.roomStatus === "finished_finalized") {
                 setSubmitting(false);
                 setLocked(true);
+            } else if (payload.roomStatus === "picking") {
+                setLocked(false);
+            } else if (roomId) {
+                navigate(`/auction/${roomId}`, { state: { username: payload.username || username, teamName: payload.teamName || teamName } });
+                return;
             }
             if (Array.isArray(payload.savedPlaying11) && payload.savedPlaying11.length) {
                 setSelected(payload.savedPlaying11);
@@ -151,7 +190,7 @@ export default function Result() {
         };
         socket.on("join_ack", onJoinAck);
         return () => socket.off("join_ack", onJoinAck);
-    }, []);
+    }, [navigate, roomId, teamName, username]);
 
     useEffect(() => {
         if (results) {
@@ -159,15 +198,16 @@ export default function Result() {
         }
     }, [results]);
 
+    const deadlineExpired = remaining !== null && remaining <= 0 && !results;
     const validation = useMemo(() => validateLineup(team, selected), [team, selected]);
 
     useEffect(() => {
-        if (!roomId || isDisqualified || locked) return;
+        if (!roomId || isDisqualified || locked || deadlineExpired) return;
         socket.emit("update_playing11_draft", { playerIds: selected });
-    }, [roomId, selected, isDisqualified, locked]);
+    }, [roomId, selected, isDisqualified, locked, deadlineExpired]);
 
     const toggle = (id) => {
-        if (locked || submitting || isDisqualified) return;
+        if (locked || submitting || isDisqualified || deadlineExpired) return;
         if (selected.includes(id)) {
             setSelected(selected.filter((x) => x !== id));
         } else {
@@ -178,7 +218,7 @@ export default function Result() {
     };
 
     const submit = () => {
-        if (isDisqualified || locked) return;
+        if (isDisqualified || locked || deadlineExpired) return;
         setError(null);
         const v = validateLineup(team, selected);
         if (!v.ok) {
@@ -292,7 +332,7 @@ export default function Result() {
                                                 checked 
                                                 ? "bg-accent/10 border-accent/30 shadow-[0_0_20px_rgba(var(--accent-rgb),0.1)]" 
                                                 : "bg-white/5 border-white/5 hover:bg-white/10"
-                                            } ${locked || submitting || isDisqualified ? "opacity-70 cursor-not-allowed" : ""}`}
+                                            } ${locked || submitting || isDisqualified || deadlineExpired ? "opacity-70 cursor-not-allowed" : ""}`}
                                             onClick={() => toggle(p.id)}
                                         >
                                             <div className="flex items-center gap-4">
@@ -359,9 +399,11 @@ export default function Result() {
                                 <button 
                                     className="primary-btn w-full !py-4 !rounded-xl text-sm font-black tracking-[0.2em] uppercase italic disabled:opacity-30 disabled:cursor-not-allowed" 
                                     onClick={submit} 
-                                    disabled={!validation.ok || submitting || isDisqualified || locked}
+                                    disabled={!validation.ok || submitting || isDisqualified || locked || deadlineExpired}
                                 >
-                                    {locked ? (
+                                    {deadlineExpired && !results ? (
+                                        "FINALIZING RESULTS..."
+                                    ) : locked ? (
                                         "PLAYING XI LOCKED"
                                     ) : submitting ? (
                                         <span className="flex items-center justify-center gap-2">
@@ -419,7 +461,10 @@ export default function Result() {
 
                             <button 
                                 className="mt-8 text-[10px] font-black uppercase tracking-[0.3em] text-slate-500 hover:text-white transition-colors flex items-center justify-center gap-2"
-                                onClick={() => navigate("/")}
+                                onClick={() => {
+                                    localStorage.removeItem("activeRoomId");
+                                    navigate("/");
+                                }}
                             >
                                 <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="m15 18-6-6 6-6"/></svg>
                                 RETURN TO ARENA

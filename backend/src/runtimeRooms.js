@@ -19,5 +19,15 @@ export function isRuntimeRoomOpenable(roomCode, roomDbId) {
     Number(roomDbId || 0) > 0 &&
     Number(room.dbId) === Number(roomDbId);
 
-  return sameSession && OPENABLE_ROOM_STATUSES.has(room.status);
+  if (!sameSession || !OPENABLE_ROOM_STATUSES.has(room.status)) {
+    return false;
+  }
+
+  const deadlineMs = Number(room.selectDeadline || 0);
+  const resultTimerExpired = deadlineMs > 0 && Date.now() >= deadlineMs;
+  if (resultTimerExpired && (room.status === "picking" || room.status === "finished_finalized")) {
+    return false;
+  }
+
+  return true;
 }

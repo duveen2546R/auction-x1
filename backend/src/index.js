@@ -127,6 +127,7 @@ function createRoom(roomId) {
     disqualified: new Set(),
     voiceUsers: new Set(),
     finalizingBid: false,
+    finalizingPlaying11: false,
     disconnectTimeouts: new Map(), // socketId -> timeout
     closeTimeout: null,
     phaseStartedAt: Date.now(),
@@ -331,6 +332,63 @@ function touchRoomActivity(room) {
   room.lastActivityAt = Date.now();
 }
 
+function emitJoinAck(socket, room) {
+  if (!socket || !room) return;
+
+  const currentUser = room.users.get(socket.id) || {};
+  const userId = Number(currentUser.userId || socket.data.userId || 0) || null;
+  const results =
+    room.status === "finished_finalized"
+      ? Array.from(room.playing11.values()).sort((a, b) => b.score - a.score)
+      : null;
+  const winner = results?.[0]?.teamName || results?.[0]?.username || "No winner";
+  const isCreator = Boolean(room.creatorUserId && userId && room.creatorUserId === userId);
+
+  socket.emit("join_ack", {
+    userId,
+    username: currentUser.username || socket.data.username,
+    team: currentUser.team || [],
+    budget: Number(currentUser.budget ?? 120),
+    teamName: currentUser.teamName || socket.data.teamName || null,
+    currentPlayer: room.currentPlayer,
+    currentBid: room.currentBid,
+    lastBidder: getHighestBidderName(room),
+    bidHistory: room.bidHistory || [],
+    queue: getQueueState(room),
+    roomStatus: room.status,
+    roomDbId: room.dbId,
+    roomSessionNumber: room.sessionNumber,
+    roomVisibility: room.visibility,
+    creatorName: room.creatorName,
+    creatorTeamName: room.creatorTeamName,
+    isCreator,
+    isSpectator: room.blockedUsers.has(socket.id),
+    isWithdrawn: room.withdrawnUsers.has(socket.id),
+    disqualified: Array.from(room.disqualified)
+      .map((sid) => room.users.get(sid)?.teamName || room.users.get(sid)?.username)
+      .filter(Boolean),
+    deadline: room.selectDeadline,
+    selectionStartTime: room.selectionStartTime,
+    timer: getTimerSnapshot(room),
+    savedPlaying11: room.playing11.get(socket.id)?.playerIds || [],
+    playing11Draft: room.playing11Drafts.get(socket.id) || [],
+    results,
+    winner,
+  });
+
+  if (room.currentPlayer) {
+    socket.emit("new_player", room.currentPlayer);
+  }
+  socket.emit("bid_update", {
+    amount: room.currentBid,
+    by: getHighestBidderName(room),
+    history: room.bidHistory || [],
+    step: room.currentBid < 10 ? 0.2 : 0.5,
+  });
+  socket.emit("queue_update", getQueueState(room));
+  socket.emit("budget_update", { budget: Number(currentUser.budget ?? 120) });
+}
+
 async function closeRoomNow(roomId, reason, code = "ROOM_CLOSED") {
   const room = rooms.get(roomId);
   if (!room) return;
@@ -394,6 +452,11 @@ function getQueueState(room) {
 function getHighestBidderName(room) {
   const user = room.users.get(room.highestBidder || "");
   return user?.teamName || user?.username || room.highestBidderName || null;
+}
+
+function getRoomUserDisplayName(room, runtimeKey, fallbackName = null) {
+  const user = room?.users?.get(runtimeKey);
+  return user?.teamName || user?.username || fallbackName || null;
 }
 
 function getHighestBidderEntry(room) {
@@ -670,10 +733,15 @@ async function restoreRoomFromDatabase(roomId, roomDbId, metadata = {}, preloade
       (room.idx > 0 && room.idx <= room.playersQueue.length ? room.playersQueue[room.idx - 1] : null);
     room.currentBid = Number(recovered?.currentBid || 0);
     room.highestBidderUserId = Number(recovered?.highestBidderUserId || 0) || null;
-    room.highestBidderName = recovered?.highestBidderName || null;
     room.highestBidder = room.highestBidderUserId
       ? persistedUserMap.get(Number(room.highestBidderUserId)) || null
       : null;
+    room.highestBidderName =
+      getRoomUserDisplayName(
+        room,
+        room.highestBidder,
+        recovered?.highestBidderName || null
+      ) || null;
     room.lastBidAt = Number(recovered?.lastBidAt || Date.now());
     room.lastActivityAt = Number(recovered?.lastActivityAt || room.lastBidAt || Date.now());
     room.totalDuration = Number(recovered?.totalDuration || 13000);
@@ -1697,15 +1765,14 @@ function endAuction(roomId) {
 
 function buildAutoLineup(team, lockedPlayerIds = []) {
   const isOverseas = (p) => (p.country || "").toLowerCase() !== "india";
-  const lockedIds = normalizePlayerIdList(lockedPlayerIds);
-  const teamById = new Map((Array.isArray(team) ? team : []).map((player) => [Number(player.id), player]));
+  const normalizedTeam = Array.isArray(team) ? team.filter(Boolean) : [];
+  const lockedIds = Array.from(new Set(normalizePlayerIdList(lockedPlayerIds)));
+  const teamById = new Map(normalizedTeam.map((player) => [Number(player.id), player]));
   const lockedLineup = lockedIds.map((playerId) => teamById.get(playerId)).filter(Boolean);
-  const lockedIdSet = new Set(lockedLineup.map((player) => Number(player.id)));
 
-  const isValid = (lineup) => {
-    if (lineup.length !== 11) return false;
+  const getStats = (lineup) => {
     let bats = 0, bowls = 0, wks = 0, ars = 0, overseas = 0;
-    lineup.forEach(p => {
+    lineup.forEach((p) => {
       const role = (p.role || "").toLowerCase();
       const os = isOverseas(p);
       if (os) overseas++;
@@ -1722,10 +1789,33 @@ function buildAutoLineup(team, lockedPlayerIds = []) {
         if (isWk) { wks++; bats++; }
       }
     });
+
+    return { bats, bowls, wks, ars, overseas };
+  };
+
+  const isValid = (lineup) => {
+    if (lineup.length !== 11) return false;
+    const { bats, bowls, wks, ars, overseas } = getStats(lineup);
     return bats >= 3 && bowls >= 2 && wks >= 1 && ars <= 4 && overseas <= 4;
   };
 
-  if (lockedLineup.length > 11) return null;
+  const canStillComplete = (seedLineup) => {
+    if (seedLineup.length > 11) return false;
+
+    const seedIds = new Set(seedLineup.map((player) => Number(player.id)));
+    const remainingPool = normalizedTeam.filter((player) => !seedIds.has(Number(player.id)));
+    if (seedLineup.length + remainingPool.length < 11) return false;
+
+    const seedStats = getStats(seedLineup);
+    if (seedStats.ars > 4 || seedStats.overseas > 4) return false;
+
+    const remainingStats = getStats(remainingPool);
+    if (seedStats.bats + remainingStats.bats < 3) return false;
+    if (seedStats.bowls + remainingStats.bowls < 2) return false;
+    if (seedStats.wks + remainingStats.wks < 1) return false;
+
+    return true;
+  };
 
   const shuffleArray = (array) => {
     const arr = [...array];
@@ -1736,86 +1826,127 @@ function buildAutoLineup(team, lockedPlayerIds = []) {
     return arr;
   };
 
-  // Try many random combinations to find a valid one
-  // This is more robust than greedy for meeting multiple constraints
-  for (let i = 0; i < 1000; i++) {
-    const shuffled = shuffleArray(
-      (Array.isArray(team) ? team : []).filter((player) => !lockedIdSet.has(Number(player.id)))
-    );
-    const lineup = [...lockedLineup];
-    const ownedIds = new Set(lockedLineup.map((player) => Number(player.id)));
+  const tryCompleteLineup = (seedLineup) => {
+    if (!canStillComplete(seedLineup)) return null;
 
-    // Fill to 11
-    for (const p of shuffled) {
-      if (lineup.length >= 11) break;
-      if (!ownedIds.has(p.id)) {
-        lineup.push(p);
-        ownedIds.add(p.id);
+    const seedIds = new Set(seedLineup.map((player) => Number(player.id)));
+    const remainingPool = normalizedTeam.filter((player) => !seedIds.has(Number(player.id)));
+
+    // Try many random combinations to find a valid one.
+    // This is more robust than greedy for meeting multiple constraints.
+    for (let i = 0; i < 1000; i++) {
+      const shuffled = shuffleArray(remainingPool);
+      const lineup = [...seedLineup];
+      const ownedIds = new Set(seedLineup.map((player) => Number(player.id)));
+
+      // Fill to 11
+      for (const p of shuffled) {
+        if (lineup.length >= 11) break;
+        if (!ownedIds.has(p.id)) {
+          lineup.push(p);
+          ownedIds.add(p.id);
+        }
       }
+
+      if (isValid(lineup)) return lineup;
     }
 
-    if (isValid(lineup)) return lineup;
+    return null;
+  };
+
+  if (lockedLineup.length > 11) return tryCompleteLineup([]);
+  const strictLockedLineup = tryCompleteLineup(lockedLineup);
+  if (strictLockedLineup) return strictLockedLineup;
+
+  // If the user's saved picks are not directly completable, keep as many of them
+  // as possible and override only the conflicting ones.
+  if (lockedLineup.length > 0) {
+    const subsetCandidates = [];
+    const totalLocked = lockedLineup.length;
+    const totalMasks = 1 << totalLocked;
+
+    for (let mask = 1; mask < totalMasks; mask += 1) {
+      const subset = [];
+      for (let index = 0; index < totalLocked; index += 1) {
+        if (mask & (1 << index)) {
+          subset.push(lockedLineup[index]);
+        }
+      }
+      subsetCandidates.push(subset);
+    }
+
+    subsetCandidates.sort((left, right) => right.length - left.length);
+
+    for (const subset of subsetCandidates) {
+      const candidateLineup = tryCompleteLineup(subset);
+      if (candidateLineup) return candidateLineup;
+    }
   }
 
-  return null;
+  return tryCompleteLineup([]);
 }
 
 async function autoFinalizePlaying11(roomId) {
   const room = rooms.get(roomId);
-  if (!room || room.status !== "picking") return;
+  if (!room || room.status !== "picking" || room.finalizingPlaying11) return;
+  room.finalizingPlaying11 = true;
 
-  const allUserIds = Array.from(room.users.keys());
-  const disqualified = room.disqualified || new Set();
-  const persistJobs = [];
+  try {
+    const allUserIds = Array.from(room.users.keys());
+    const disqualified = room.disqualified || new Set();
+    const persistJobs = [];
 
-  for (const sid of allUserIds) {
-    if (disqualified.has(sid)) continue;
-    if (room.playing11.has(sid)) continue;
+    for (const sid of allUserIds) {
+      if (disqualified.has(sid)) continue;
+      if (room.playing11.has(sid)) continue;
 
-    const user = room.users.get(sid);
-    if (!user || !user.team) continue;
+      const user = room.users.get(sid);
+      if (!user || !user.team) continue;
 
-    const savedDraftIds = room.playing11Drafts.get(sid) || [];
-    const lineup = buildAutoLineup(user.team, savedDraftIds);
-    if (lineup) {
-      const evalResult = evaluatePlaying11(room, sid, lineup.map((p) => p.id));
-      if (evalResult.ok) {
-        room.playing11.set(sid, { 
-          ...evalResult, 
-          playerIds: lineup.map((p) => p.id), 
-          username: user.username, 
-          teamName: user.teamName,
-          playerNames: lineup.map(p => p.name)
-        });
-        if (room.dbId && user.userId) {
-          persistJobs.push(
-            persistPlaying11(room.dbId, user.userId, lineup.map((p) => p.id), evalResult.score)
-              .catch((err) => console.error("Failed to persist playing11", formatDbError(err)))
-          );
+      const savedDraftIds = room.playing11Drafts.get(sid) || [];
+      const lineup = buildAutoLineup(user.team, savedDraftIds);
+      if (lineup) {
+        const evalResult = evaluatePlaying11(room, sid, lineup.map((p) => p.id));
+        if (evalResult.ok) {
+          room.playing11.set(sid, { 
+            ...evalResult, 
+            playerIds: lineup.map((p) => p.id), 
+            username: user.username, 
+            teamName: user.teamName,
+            playerNames: lineup.map(p => p.name)
+          });
+          if (room.dbId && user.userId) {
+            persistJobs.push(
+              persistPlaying11(room.dbId, user.userId, lineup.map((p) => p.id), evalResult.score)
+                .catch((err) => console.error("Failed to persist playing11", formatDbError(err)))
+            );
+          }
+          room.playing11Drafts.delete(sid);
+        } else {
+          disqualified.add(sid);
         }
-        room.playing11Drafts.delete(sid);
       } else {
         disqualified.add(sid);
       }
-    } else {
-      disqualified.add(sid);
     }
+
+    if (persistJobs.length) {
+      await Promise.allSettled(persistJobs);
+    }
+
+    room.disqualified = disqualified;
+    setRoomStatus(room, "finished_finalized");
+    await persistAuctionState(roomId);
+
+    const results = Array.from(room.playing11.values()).sort((a, b) => b.score - a.score);
+    const winnerName = results[0]?.teamName || results[0]?.username || "No winner";
+    const dqNames = Array.from(disqualified).map((sid) => room.users.get(sid)?.teamName || room.users.get(sid)?.username).filter(Boolean);
+
+    io.to(roomId).emit("playing11_results", { winner: winnerName, results, disqualified: dqNames });
+    scheduleFinishedRoomClosure(roomId, room.dbId);
+  } finally {
+    room.finalizingPlaying11 = false;
   }
-
-  if (persistJobs.length) {
-    await Promise.allSettled(persistJobs);
-  }
-
-  room.disqualified = disqualified;
-  setRoomStatus(room, "finished_finalized");
-  await persistAuctionState(roomId);
-
-  const results = Array.from(room.playing11.values()).sort((a, b) => b.score - a.score);
-  const winnerName = results[0]?.teamName || results[0]?.username || "No winner";
-  const dqNames = Array.from(disqualified).map((sid) => room.users.get(sid)?.teamName || room.users.get(sid)?.username).filter(Boolean);
-
-  io.to(roomId).emit("playing11_results", { winner: winnerName, results, disqualified: dqNames });
-  scheduleFinishedRoomClosure(roomId, room.dbId);
 }
 
 
@@ -1853,7 +1984,7 @@ function handleBid(socket, amount) {
   const newRemainingMs = Math.min(15000, remainingMs + 5000);
   room.totalDuration = newRemainingMs;
 
-  const bidderName = user?.teamName || socket.data.username;
+  const bidderName = getRoomUserDisplayName(room, socket.id, socket.data.teamName || socket.data.username);
   room.currentBid = numericBid;
   room.highestBidder = socket.id;
   room.highestBidderUserId = user?.userId || null;
@@ -1887,7 +2018,7 @@ function handleBid(socket, amount) {
   persistAuctionState(roomId);
 }
 
-const EMPTY_ROOM_RETENTION_MS = 2 * 60 * 60 * 1000;
+const EMPTY_ROOM_RETENTION_MS = 30 * 60 * 1000;
 const INACTIVE_AUCTION_ROOM_RETENTION_MS = 30 * 60 * 1000;
 const ROOM_CLEANUP_INTERVAL_MS = 60 * 1000;
 const AUCTION_STALL_WATCHDOG_INTERVAL_MS = 5000;
@@ -1928,6 +2059,17 @@ setInterval(async () => {
     if (room.status === "transitioning" && now - Number(room.phaseStartedAt || now) > 12000) {
       console.warn(`Watchdog advancing stuck transition in room ${roomId}`);
       startNextPlayer(roomId);
+      continue;
+    }
+
+    if (
+      room.status === "picking" &&
+      Number(room.selectDeadline || 0) > 0 &&
+      now >= Number(room.selectDeadline) &&
+      !room.finalizingPlaying11
+    ) {
+      console.warn(`Watchdog auto-finalizing expired Playing XI phase in room ${roomId}`);
+      await autoFinalizePlaying11(roomId);
     }
   }
 }, AUCTION_STALL_WATCHDOG_INTERVAL_MS);
@@ -1941,7 +2083,9 @@ setInterval(async () => {
   const roomsToForceClose = [];
 
   for (const [roomId, room] of Array.from(rooms.entries())) {
-    if (room.users.size === 0 && (now - room.lastBidAt > EMPTY_ROOM_RETENTION_MS)) {
+    const inactivityMs = now - Number(room.lastActivityAt || room.lastBidAt || room.createdAt || now);
+
+    if (room.users.size === 0 && inactivityMs > EMPTY_ROOM_RETENTION_MS) {
       console.log(`Cleaning up inactive room: ${roomId}`);
       if (room.timer) clearInterval(room.timer);
       if (room.closeTimeout) clearTimeout(room.closeTimeout);
@@ -1956,10 +2100,7 @@ setInterval(async () => {
       continue;
     }
 
-    if (
-      isAuctionFlowRoomStatus(room.status) &&
-      now - Number(room.lastActivityAt || room.lastBidAt || room.createdAt || now) > INACTIVE_AUCTION_ROOM_RETENTION_MS
-    ) {
+    if (inactivityMs > INACTIVE_AUCTION_ROOM_RETENTION_MS) {
       roomsToForceClose.push(roomId);
     }
   }
@@ -1989,7 +2130,7 @@ io.on("connection", (socket) => {
     socket.leave(PUBLIC_ROOMS_CHANNEL);
   });
 
-  socket.on("join_room", async ({ roomId, username, teamName, visibility, token }) => {
+  socket.on("join_room", async ({ roomId, username, teamName, visibility, token, intent }) => {
     if (!roomId) return;
     let authenticatedSession = null;
     if (token) {
@@ -2014,11 +2155,32 @@ io.on("connection", (socket) => {
       rememberedUsername ||
       `Player-${socket.id.slice(-4)}`;
     let cleanTeam = providedTeamName || rememberedTeamName || null;
+    const joinIntent = intent === "create" ? "create" : intent === "resume" ? "resume" : "join";
     const requestedVisibility =
       visibility === "public" ? "public" : visibility === "private" ? "private" : null;
     socket.data.roomId = roomId;
     socket.data.username = cleanName;
     socket.data.teamName = cleanTeam;
+
+    const liveRoom = rooms.get(roomId);
+    const existingSocketUser = liveRoom?.users?.get(socket.id);
+    if (liveRoom && existingSocketUser) {
+      socket.data.username = existingSocketUser.username || cleanName;
+      socket.data.teamName = existingSocketUser.teamName || cleanTeam || null;
+      socket.data.userId = existingSocketUser.userId || authenticatedSession?.userId || null;
+      socket.join(roomId);
+      if (liveRoom.status === "running" && !liveRoom.timer) {
+        startTimer(roomId, { preserveElapsed: true });
+      }
+      if (liveRoom.status === "picking" && liveRoom.selectDeadline && Date.now() > Number(liveRoom.selectDeadline)) {
+        autoFinalizePlaying11(roomId);
+      }
+      if (liveRoom.status === "finished_finalized") {
+        scheduleFinishedRoomClosure(roomId, liveRoom.dbId);
+      }
+      emitJoinAck(socket, liveRoom);
+      return;
+    }
 
     let userId = authenticatedSession?.userId || socket.data.userId || null;
     let roomDbId = null;
@@ -2078,6 +2240,14 @@ io.on("connection", (socket) => {
           !shouldReuseFinishedLiveSession &&
           !shouldReuseFinishedStoredSession)
       ) {
+        if (joinIntent !== "create") {
+          socket.emit("join_error", {
+            code: latestSession ? "ROOM_CLOSED" : "ROOM_NOT_FOUND",
+            reason: latestSession ? "This room is already closed." : "Room code not found.",
+          });
+          return;
+        }
+
         if (!authenticatedSession?.userId) {
           socket.emit("join_error", {
             code: "AUTH_REQUIRED_CREATE",
@@ -2116,6 +2286,40 @@ io.on("connection", (socket) => {
         latestStoredState
       );
       [existingSocketId, existingUser] = findRoomUser(room, userId, cleanName);
+
+      if (!existingUser && cleanTeam) {
+        const matchedRuntimeEntry = Array.from(room.users.entries()).find(
+          ([, roomUser]) => roomUser?.teamName && roomUser.teamName === cleanTeam
+        );
+        if (matchedRuntimeEntry) {
+          [existingSocketId, existingUser] = matchedRuntimeEntry;
+          userId = existingUser?.userId || userId;
+          cleanName = existingUser?.username || cleanName;
+          cleanTeam = existingUser?.teamName || cleanTeam;
+          socket.data.username = cleanName;
+          socket.data.userId = userId;
+          socket.data.teamName = cleanTeam;
+        }
+      }
+
+      if (!existingUser && roomDbId && cleanTeam) {
+        const [matchedRows] = await pool.query(
+          `SELECT rp.user_id AS "userId", u.username, rp.team_name AS "teamName"
+           FROM room_players rp
+           JOIN users u ON u.id = rp.user_id
+           WHERE rp.room_id = ? AND rp.team_name = ? LIMIT 1`,
+          [roomDbId, cleanTeam]
+        );
+        if (matchedRows.length) {
+          userId = Number(matchedRows[0].userId) || userId;
+          cleanName = matchedRows[0].username || cleanName;
+          cleanTeam = matchedRows[0].teamName || cleanTeam;
+          socket.data.username = cleanName;
+          socket.data.userId = userId;
+          socket.data.teamName = cleanTeam;
+          [existingSocketId, existingUser] = findRoomUser(room, userId, cleanName);
+        }
+      }
 
       // Check if auction is ongoing and user is not already registered
       const dbSessionAlreadyStarted = latestSession?.status === "ongoing";
@@ -2239,7 +2443,7 @@ io.on("connection", (socket) => {
 
     if (room.highestBidderUserId && userId && room.highestBidderUserId === userId) {
       room.highestBidder = socket.id;
-      room.highestBidderName = cleanName;
+      room.highestBidderName = mergedUser.teamName || cleanName;
     }
 
     socket.join(roomId);
@@ -2253,50 +2457,7 @@ io.on("connection", (socket) => {
       scheduleFinishedRoomClosure(roomId, room.dbId);
     }
     broadcastPlayers(roomId);
-    const results = room.status === "finished_finalized" ? Array.from(room.playing11.values()).sort((a, b) => b.score - a.score) : null;
-    const winner = results?.[0]?.teamName || results?.[0]?.username || "No winner";
-    const isCreator = Boolean(room.creatorUserId && userId && room.creatorUserId === userId);
-
-    socket.emit("join_ack", {
-      userId,
-      username: cleanName,
-      team: team,
-      budget: mergedBudget,
-      teamName: mergedUser.teamName,
-      currentPlayer: room.currentPlayer,
-      currentBid: room.currentBid,
-      lastBidder: getHighestBidderName(room),
-      bidHistory: room.bidHistory || [],
-      queue: getQueueState(room),
-      roomStatus: room.status,
-      roomDbId: room.dbId,
-      roomSessionNumber: room.sessionNumber,
-      roomVisibility: room.visibility,
-      creatorName: room.creatorName,
-      creatorTeamName: room.creatorTeamName,
-      isCreator,
-      isSpectator,
-      isWithdrawn: room.withdrawnUsers.has(socket.id),
-      disqualified: Array.from(room.disqualified).map((sid) => room.users.get(sid)?.teamName || room.users.get(sid)?.username).filter(Boolean),
-      deadline: room.selectDeadline,
-      selectionStartTime: room.selectionStartTime,
-      timer: getTimerSnapshot(room),
-      savedPlaying11: room.playing11.get(socket.id)?.playerIds || [],
-      playing11Draft: room.playing11Drafts.get(socket.id) || [],
-      results,
-      winner
-    });
-    if (room.currentPlayer) {
-      socket.emit("new_player", room.currentPlayer);
-    }
-    socket.emit("bid_update", {
-      amount: room.currentBid,
-      by: getHighestBidderName(room),
-      history: room.bidHistory || [],
-      step: room.currentBid < 10 ? 0.2 : 0.5,
-    });
-    socket.emit("queue_update", getQueueState(room));
-    socket.emit("budget_update", { budget: mergedBudget });
+    emitJoinAck(socket, room);
   });
 
   socket.on("voice_join", ({ roomId, username }) => {
@@ -2382,6 +2543,7 @@ io.on("connection", (socket) => {
     room.highestBidderUserId = null;
     room.highestBidderName = null;
     room.finalizingBid = false;
+    room.finalizingPlaying11 = false;
     room.playing11 = new Map();
     room.playing11Drafts = new Map();
     room.disqualified = new Set();
@@ -2416,6 +2578,7 @@ io.on("connection", (socket) => {
     if (!room || !room.currentPlayer || room.status !== "running") return;
     touchRoomActivity(room);
 
+    const actorName = getRoomUserDisplayName(room, socket.id, socket.data.teamName || socket.data.username);
     room.skipPoolUsers.add(socket.id);
     // Also mark as passed for the current player
     room.passedUsers.add(socket.id);
@@ -2430,7 +2593,7 @@ io.on("connection", (socket) => {
     // Notify others that this user passed via skip vote
     room.bidHistory.push({
       amount: room.currentBid,
-      by: socket.data.username,
+      by: actorName,
       ts: Date.now(),
       note: "skip pool vote",
     });
@@ -2447,6 +2610,7 @@ io.on("connection", (socket) => {
     if (!room) return;
     touchRoomActivity(room);
 
+    const actorName = getRoomUserDisplayName(room, socket.id, socket.data.teamName || socket.data.username);
     room.blockedUsers.add(socket.id);
     room.withdrawnUsers.add(socket.id);
     persistAuctionState(roomId);
@@ -2454,7 +2618,7 @@ io.on("connection", (socket) => {
     if (room.currentPlayer && room.highestBidder === socket.id) {
       room.bidHistory.push({
         amount: room.currentBid,
-        by: socket.data.username,
+        by: actorName,
         ts: Date.now(),
         note: "withdraw (forced sale)",
       });
@@ -2471,10 +2635,11 @@ io.on("connection", (socket) => {
     const room = rooms.get(roomId);
     if (!room || !room.currentPlayer) return;
     touchRoomActivity(room);
+    const actorName = getRoomUserDisplayName(room, socket.id, socket.data.teamName || socket.data.username);
     room.passedUsers.add(socket.id);
     room.bidHistory.push({
       amount: room.currentBid,
-      by: socket.data.username,
+      by: actorName,
       ts: Date.now(),
       note: "pass",
     });
@@ -2538,7 +2703,11 @@ io.on("connection", (socket) => {
     if (!room) return;
     touchRoomActivity(room);
 
-    if (room.selectDeadline && Date.now() > room.selectDeadline) return;
+    if (room.selectDeadline && Date.now() > room.selectDeadline) {
+      autoFinalizePlaying11(roomId);
+      socket.emit("playing11_error", { reason: "Playing XI timer ended. Finalizing results now." });
+      return;
+    }
     if (room.disqualified.has(socket.id)) {
       socket.emit("playing11_error", { reason: "Disqualified: insufficient squad to form valid XI" });
       return;

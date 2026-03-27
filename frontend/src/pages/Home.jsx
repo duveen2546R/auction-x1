@@ -8,14 +8,15 @@ export default function Home() {
     const [roomCode, setRoomCode] = useState("");
     const [teamName, setTeamName] = useState(localStorage.getItem("teamName") || "");
     const [roomVisibility, setRoomVisibility] = useState("private");
+    const [joinError, setJoinError] = useState("");
     const [teams, setTeams] = useState([]);
     const [players, setPlayers] = useState([]);
     const [publicRooms, setPublicRooms] = useState([]);
     const [sessionToken, setSessionToken] = useState(() => getAuthToken());
     const navigate = useNavigate();
+    const apiBase = import.meta.env.VITE_API_URL || "http://localhost:5000";
 
     useEffect(() => {
-        const apiBase = import.meta.env.VITE_API_URL || "http://localhost:5000";
         fetch(`${apiBase}/teams`)
             .then((res) => res.json())
             .then(setTeams)
@@ -24,7 +25,7 @@ export default function Home() {
             .then((r) => r.json())
             .then(setPlayers)
             .catch(() => setPlayers([]));
-    }, []);
+    }, [apiBase]);
 
     useEffect(() => {
         const handlePublicRoomsUpdate = (rooms) => {
@@ -63,7 +64,7 @@ export default function Home() {
 
     const createRoom = () => {
         const roomId = Math.floor(100000 + Math.random() * 900000);
-        navigate(`/lobby/${roomId}`, { state: { username: activeUsername, teamName, roomVisibility } });
+        navigate(`/lobby/${roomId}`, { state: { username: activeUsername, teamName, roomVisibility, joinIntent: "create" } });
     };
 
     const handleCreateRoomClick = () => {
@@ -75,10 +76,26 @@ export default function Home() {
         createRoom();
     };
 
-    const joinRoom = (nextRoomId = roomCode) => {
+    const joinRoom = async (nextRoomId = roomCode) => {
         const targetRoomId = String(nextRoomId || "").trim();
         if (!targetRoomId) return;
-        navigate(`/lobby/${targetRoomId}`, { state: { username: activeUsername, teamName } });
+        setJoinError("");
+
+        try {
+            const res = await fetch(`${apiBase}/rooms/${targetRoomId}/joinability`);
+            const data = await res.json();
+            if (!res.ok) {
+                throw new Error(data.error || "Unable to verify room code");
+            }
+            if (!data.exists) {
+                setJoinError("Room code not found or already closed.");
+                return;
+            }
+
+            navigate(`/lobby/${targetRoomId}`, { state: { username: activeUsername, teamName, joinIntent: "join" } });
+        } catch (err) {
+            setJoinError(err.message || "Unable to verify room code");
+        }
     };
 
     const handleLogout = () => {
@@ -263,7 +280,10 @@ export default function Home() {
                                             className="w-full rounded-xl border border-white/5 bg-white/5 px-4 py-3 text-sm text-white placeholder-slate-700 focus:outline-none focus:ring-2 focus:ring-accent transition-all text-center tracking-[0.5em] font-black"
                                             placeholder="XXXXXX"
                                             value={roomCode}
-                                            onChange={(e) => setRoomCode(e.target.value)}
+                                            onChange={(e) => {
+                                                setRoomCode(e.target.value);
+                                                setJoinError("");
+                                            }}
                                         />
                                         <button
                                             className="primary-btn w-full !py-4 !rounded-xl text-sm font-black tracking-[0.2em] uppercase italic disabled:opacity-30 transition-all"
@@ -272,6 +292,11 @@ export default function Home() {
                                         >
                                             ENTER ROOM
                                         </button>
+                                        {joinError && (
+                                            <p className="text-[10px] font-bold uppercase tracking-widest text-rose-400">
+                                                {joinError}
+                                            </p>
+                                        )}
                                     </div>
 
                                     <div className="border-t border-white/5 pt-6 space-y-4">

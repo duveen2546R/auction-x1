@@ -31,6 +31,7 @@ export default function Lobby() {
     const username = state?.username || localStorage.getItem("username") || "Player";
     const teamName = state?.teamName || localStorage.getItem("teamName") || "";
     const requestedVisibility = state?.roomVisibility;
+    const joinIntent = state?.joinIntent || "join";
     const [error, setError] = useState(null);
 
     const bgSlug = useMemo(() => {
@@ -49,6 +50,7 @@ export default function Lobby() {
                 teamName,
                 visibility: requestedVisibility,
                 token: getAuthToken(),
+                intent: joinIntent,
             });
         };
 
@@ -104,6 +106,11 @@ export default function Lobby() {
             setError(payload?.reason || "Unable to join this room.");
         });
 
+        socket.on("room_closed", (payload) => {
+            alert(payload?.reason || "This room was closed.");
+            navigate("/");
+        });
+
         return () => {
             socket.off("connect", joinRoom);
             socket.off("join_ack");
@@ -112,8 +119,9 @@ export default function Lobby() {
             socket.off("team_taken");
             socket.off("start_auction_denied");
             socket.off("join_error");
+            socket.off("room_closed");
         };
-    }, [navigate, requestedVisibility, roomId, username, teamName]);
+    }, [navigate, requestedVisibility, roomId, username, teamName, joinIntent]);
 
     const creatorLabel = creatorName || players.find((player) => player.isCreator)?.username || "Room Creator";
     const startDisabled = players.length < 2 || !isCreator;
