@@ -28,6 +28,39 @@ export default function History() {
     });
   };
 
+  const exportPlaying11s = (item) => {
+    const rows = Array.isArray(item?.leaderboard) ? item.leaderboard : [];
+    if (!rows.length) return;
+
+    const lines = [
+      `ROOM ${item.roomCode} - SESSION ${item.sessionNumber || 1}`,
+      "",
+    ];
+
+    rows.forEach((entry, index) => {
+      lines.push(`${index + 1}. ${(entry.teamName || entry.username || "Team").toUpperCase()}`);
+      const playing11 = Array.isArray(entry.playing11) ? entry.playing11 : [];
+      if (playing11.length) {
+        playing11.forEach((playerName, playerIndex) => {
+          lines.push(`${playerIndex + 1}. ${playerName}`);
+        });
+      } else {
+        lines.push("Playing XI not available");
+      }
+      lines.push("");
+    });
+
+    const blob = new Blob([lines.join("\n")], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `room_${item.roomCode}_session_${item.sessionNumber || 1}_playing11.txt`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
   useEffect(() => {
     if (!token) {
       navigate("/auth", { replace: true });
@@ -176,19 +209,30 @@ export default function History() {
                     </div>
                   </div>
 
-                  {item.canOpen ? (
-                    <button
-                      type="button"
-                      onClick={() => openRoom(item)}
-                      className="rounded-xl border border-white/10 bg-white/5 px-5 py-3 text-[10px] font-black uppercase tracking-[0.2em] text-white transition hover:border-accent/30 hover:text-accent"
-                    >
-                      Open Room
-                    </button>
-                  ) : (
-                    <span className="rounded-xl border border-white/10 bg-white/5 px-5 py-3 text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">
-                      Archived Session
-                    </span>
-                  )}
+                  <div className="flex flex-wrap gap-3">
+                    {item.leaderboard?.length ? (
+                      <button
+                        type="button"
+                        onClick={() => exportPlaying11s(item)}
+                        className="rounded-xl border border-emerald-500/20 bg-emerald-500/10 px-5 py-3 text-[10px] font-black uppercase tracking-[0.2em] text-emerald-200 transition hover:border-emerald-400/40 hover:text-white"
+                      >
+                        Export Playing XIs
+                      </button>
+                    ) : null}
+                    {item.canOpen ? (
+                      <button
+                        type="button"
+                        onClick={() => openRoom(item)}
+                        className="rounded-xl border border-white/10 bg-white/5 px-5 py-3 text-[10px] font-black uppercase tracking-[0.2em] text-white transition hover:border-accent/30 hover:text-accent"
+                      >
+                        Open Room
+                      </button>
+                    ) : (
+                      <span className="rounded-xl border border-white/10 bg-white/5 px-5 py-3 text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">
+                        Archived Session
+                      </span>
+                    )}
+                  </div>
                 </div>
 
                 <div className="grid gap-6 lg:grid-cols-[1.1fr_0.9fr]">

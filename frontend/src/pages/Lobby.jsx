@@ -98,7 +98,7 @@ export default function Lobby() {
                 return;
             }
 
-            if (payload?.code === "AUTH_REQUIRED_CREATE") {
+            if (payload?.code === "AUTH_REQUIRED_CREATE" || payload?.code === "AUTH_REQUIRED_JOIN") {
                 navigate("/auth");
                 return;
             }

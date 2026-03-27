@@ -2196,6 +2196,14 @@ io.on("connection", (socket) => {
       }
     }
 
+    if (!authenticatedSession?.userId) {
+      socket.emit("join_error", {
+        code: "AUTH_REQUIRED_JOIN",
+        reason: "Please log in before joining or reconnecting to a room.",
+      });
+      return;
+    }
+
     const providedUsername = (username || "").trim();
     const rememberedUsername = (socket.data.username || "").trim();
     const providedTeamName = (teamName || "").trim();

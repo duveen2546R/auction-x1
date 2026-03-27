@@ -4,7 +4,6 @@ import socket from "../socket";
 import { clearSession, getAuthToken, getStoredUsername } from "../session";
 
 export default function Home() {
-    const [username, setUsername] = useState(getStoredUsername());
     const [roomCode, setRoomCode] = useState("");
     const [teamName, setTeamName] = useState(localStorage.getItem("teamName") || "");
     const [roomVisibility, setRoomVisibility] = useState("private");
@@ -47,19 +46,13 @@ export default function Home() {
         };
     }, []);
 
-    const persistName = (name) => {
-        if (sessionToken) return;
-        setUsername(name);
-        localStorage.setItem("username", name);
-    };
-
     const persistTeam = (team) => {
         setTeamName(team);
         localStorage.setItem("teamName", team);
     };
 
     const accountUsername = getStoredUsername();
-    const activeUsername = sessionToken ? accountUsername : username;
+    const activeUsername = accountUsername;
     const isAuthenticated = Boolean(sessionToken);
 
     const openExistingRoom = (targetRoomId, openTarget) => {
@@ -94,6 +87,16 @@ export default function Home() {
         if (!targetRoomId) return;
         setJoinError("");
 
+        if (!isAuthenticated) {
+            navigate("/auth");
+            return;
+        }
+
+        if (!teamName) {
+            setJoinError("Select your franchise after logging in to enter a room.");
+            return;
+        }
+
         try {
             const res = await fetch(`${apiBase}/rooms/${targetRoomId}/joinability`);
             const data = await res.json();
@@ -114,11 +117,10 @@ export default function Home() {
     const handleLogout = () => {
         clearSession();
         setSessionToken("");
-        setUsername("");
         navigate("/auth");
     };
 
-    const canProceed = activeUsername && teamName;
+    const canProceed = isAuthenticated && activeUsername && teamName;
 
     const grouped = useMemo(() => {
         const g = { batsman: [], bowler: [], allrounder: [], wicketkeeper: [] };
@@ -220,16 +222,16 @@ export default function Home() {
                                             <label className="text-[10px] text-slate-400 font-black uppercase tracking-[0.2em] mb-2">Franchise Owner</label>
                                             <input
                                                 className="w-full rounded-xl border border-white/5 bg-white/5 px-4 py-3 text-sm text-white placeholder-slate-700 focus:outline-none focus:ring-2 focus:ring-accent transition-all"
-                                                placeholder="Enter owner name..."
+                                                placeholder="Login required"
                                                 value={activeUsername}
-                                                onChange={(e) => persistName(e.target.value)}
-                                                disabled={isAuthenticated}
+                                                readOnly
+                                                disabled
                                             />
-                                            {isAuthenticated && (
-                                                <p className="mt-2 text-[10px] font-bold uppercase tracking-widest text-emerald-300">
-                                                    Account username is locked to your signed-in profile.
-                                                </p>
-                                            )}
+                                            <p className="mt-2 text-[10px] font-bold uppercase tracking-widest text-emerald-300">
+                                                {isAuthenticated
+                                                    ? "Account username is locked to your signed-in profile."
+                                                    : "Log in first. Joining any room now requires an account."}
+                                            </p>
                                         </div>
                                         <div className="flex flex-col">
                                             <label className="text-[10px] text-slate-400 font-black uppercase tracking-[0.2em] mb-2">Select Franchise</label>
@@ -237,6 +239,7 @@ export default function Home() {
                                                 className="w-full rounded-xl border border-white/5 bg-white/5 px-4 py-3 text-sm text-white focus:outline-none focus:ring-2 focus:ring-accent transition-all appearance-none"
                                                 value={teamName}
                                                 onChange={(e) => persistTeam(e.target.value)}
+                                                disabled={!isAuthenticated}
                                             >
                                                 <option value="" disabled className="bg-night">Choose your legacy...</option>
                                                 {teams.map((t) => (
@@ -301,9 +304,9 @@ export default function Home() {
                                         <button
                                             className="primary-btn w-full !py-4 !rounded-xl text-sm font-black tracking-[0.2em] uppercase italic disabled:opacity-30 transition-all"
                                             onClick={() => joinRoom()}
-                                            disabled={!canProceed || !roomCode}
+                                            disabled={!roomCode}
                                         >
-                                            ENTER ROOM
+                                            {isAuthenticated ? "ENTER ROOM" : "LOGIN TO JOIN ROOM"}
                                         </button>
                                         {joinError && (
                                             <p className="text-[10px] font-bold uppercase tracking-widest text-rose-400">
@@ -331,8 +334,7 @@ export default function Home() {
                                                     key={room.roomId}
                                                     type="button"
                                                     onClick={() => joinRoom(room.roomId)}
-                                                    disabled={!canProceed}
-                                                    className="w-full rounded-2xl border border-white/5 bg-black/20 p-4 text-left transition hover:border-accent/30 hover:bg-white/5 disabled:cursor-not-allowed disabled:opacity-50"
+                                                    className="w-full rounded-2xl border border-white/5 bg-black/20 p-4 text-left transition hover:border-accent/30 hover:bg-white/5"
                                                 >
                                                     <div className="flex items-center justify-between gap-3">
                                                         <span className="text-xs font-black uppercase tracking-[0.2em] text-white italic">
@@ -358,9 +360,14 @@ export default function Home() {
                                             )}
                                         </div>
 
-                                        {!canProceed && publicRooms.length > 0 && (
+                                        {!isAuthenticated && publicRooms.length > 0 && (
                                             <p className="text-[10px] font-bold uppercase tracking-widest text-amber-300">
-                                                Add your owner name and franchise first to join a live public lobby.
+                                                Sign in first to join a live public lobby.
+                                            </p>
+                                        )}
+                                        {isAuthenticated && !teamName && publicRooms.length > 0 && (
+                                            <p className="text-[10px] font-bold uppercase tracking-widest text-amber-300">
+                                                Select your franchise after logging in to join a live public lobby.
                                             </p>
                                         )}
                                     </div>

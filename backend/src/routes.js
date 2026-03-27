@@ -565,6 +565,7 @@ router.get("/user/history", requireAuth, async (req, res) => {
         username: entry.username,
         teamName: entry.teamName,
         score: entry.score,
+        playing11: entry.playing11,
       }));
 
       const currentUserEntry = (leaderboardByRoom.get(Number(room.id)) || []).find(

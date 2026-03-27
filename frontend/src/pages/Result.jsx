@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import socket from "../socket";
-import { getAuthToken } from "../session";
+import { clearSession, getAuthToken } from "../session";
 
 function validateLineup(team, ids) {
     const lineup = team.filter((p) => ids.includes(p.id));
@@ -124,6 +124,16 @@ export default function Result() {
             }
             navigate("/");
         };
+        const onJoinError = (payload) => {
+            if (payload?.code?.startsWith("AUTH_")) {
+                clearSession();
+                navigate("/auth");
+                return;
+            }
+            if (payload?.reason) {
+                setError(payload.reason);
+            }
+        };
 
         socket.on("playing11_results", onResults);
         socket.on("playing11_error", onErr);
@@ -135,11 +145,13 @@ export default function Result() {
             }
         });
         socket.on("room_closed", onRoomClosed);
+        socket.on("join_error", onJoinError);
         return () => {
             socket.off("playing11_results", onResults);
             socket.off("playing11_error", onErr);
             socket.off("playing11_ack");
             socket.off("room_closed", onRoomClosed);
+            socket.off("join_error", onJoinError);
         };
     }, [navigate]);
 
