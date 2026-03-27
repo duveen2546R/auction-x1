@@ -263,8 +263,9 @@ export default function Auction() {
         socket.on("bid_warning", (payload) => {
             if (!payload) return;
             markAuctionEvent();
-            if (payload.stage === "once") setWarning(`Going once for ${payload.by || "current bid"}...`);
-            if (payload.stage === "twice") setWarning(`Going twice for ${payload.by || "current bid"}...`);
+            const bidderLabel = payload.by || "current bid";
+            if (payload.stage === "once") setWarning(`Going once for ${bidderLabel}...`);
+            if (payload.stage === "twice") setWarning(`Going twice for ${bidderLabel}...`);
         });
 
         socket.on("chat_message", (msg) => {
@@ -518,6 +519,13 @@ export default function Auction() {
 
     const currentIdx = Number(queueInfo.currentIndex ?? 0);
     const totalCount = Number(queueInfo.total ?? 0);
+    const bidLeaderLength = String(lastBidder || "").trim().length;
+    const bidLeaderTextClass =
+        bidLeaderLength > 28
+            ? "text-[1.65rem] md:text-[2rem]"
+            : bidLeaderLength > 20
+                ? "text-[2rem] md:text-[2.4rem]"
+                : "text-4xl md:text-5xl";
 
     return (
         <div
@@ -634,9 +642,11 @@ export default function Auction() {
                                 <div className="space-y-4">
                                     <div className="flex flex-col">
                                         <span className="text-[10px] text-slate-400 font-black uppercase tracking-[0.2em] mb-2">Current Bid Leader</span>
-                                        <h3 className="text-4xl font-black text-white italic uppercase tracking-tight tabular-nums min-h-[40px]">
-                                            {lastBidder || <span className="text-slate-700">NO BIDS</span>}
-                                        </h3>
+                                        <div className="flex items-end min-h-[88px] md:min-h-[104px] w-full max-w-[34rem]">
+                                            <h3 className={`${bidLeaderTextClass} font-black text-white italic uppercase tracking-tight leading-[0.88] break-words w-full`}>
+                                                {lastBidder || <span className="text-slate-700">NO BIDS</span>}
+                                            </h3>
+                                        </div>
                                     </div>
                                     <div className="flex flex-col">
                                         <span className="text-[10px] text-slate-400 font-black uppercase tracking-[0.2em] mb-2">Current Valuation</span>
@@ -705,7 +715,9 @@ export default function Auction() {
                                     {Array.isArray(bidHistory) && bidHistory.slice().reverse().map((h, i) => (
                                         <div key={i} className="flex justify-between items-center bg-white/5 border border-white/5 p-3 rounded-xl hover:bg-white/10 transition">
                                             <div className="flex flex-col">
-                                                <span className="text-white font-bold text-sm uppercase italic tracking-tight">{h.by || "—"}</span>
+                                                <span className="text-white font-bold text-sm uppercase italic tracking-tight">
+                                                    {h.by || "—"}
+                                                </span>
                                                 <span className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">{h.note || "BID"}</span>
                                             </div>
                                             <span className="text-lg font-black text-accent italic tracking-tighter">₹{h.amount} Cr</span>

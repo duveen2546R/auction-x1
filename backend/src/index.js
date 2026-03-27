@@ -123,6 +123,7 @@ function createRoom(roomId) {
     blockedUsers: new Set(),
     withdrawnUsers: new Set(),
     playing11: new Map(),
+    playing11Drafts: new Map(),
     disqualified: new Set(),
     voiceUsers: new Set(),
     finalizingBid: false,
@@ -144,6 +145,63 @@ function getEligiblePlaying11Participants(room) {
   return Array.from(room.users.entries())
     .filter(([socketId, user]) => !room.disqualified.has(socketId) && Array.isArray(user?.team))
     .map(([socketId]) => socketId);
+}
+
+function getDisqualifiedUserIds(room) {
+  return Array.from(room.disqualified || [])
+    .map((runtimeKey) => getRuntimeEntryUserId(room, runtimeKey))
+    .filter((userId) => Number.isInteger(userId) && userId > 0);
+}
+
+async function getEligiblePlaying11SubmissionTarget(room) {
+  if (!room) return 0;
+
+  if (room.dbId) {
+    const disqualifiedUserIds = getDisqualifiedUserIds(room);
+    try {
+      if (disqualifiedUserIds.length) {
+        const placeholders = disqualifiedUserIds.map(() => "?").join(", ");
+        const [rows] = await pool.query(
+          `SELECT COUNT(DISTINCT user_id) AS count
+           FROM room_players
+           WHERE room_id = ?
+             AND user_id NOT IN (${placeholders})`,
+          [room.dbId, ...disqualifiedUserIds]
+        );
+        return Number(rows?.[0]?.count || 0);
+      }
+
+      const [rows] = await pool.query(
+        `SELECT COUNT(DISTINCT user_id) AS count
+         FROM room_players
+         WHERE room_id = ?`,
+        [room.dbId]
+      );
+      return Number(rows?.[0]?.count || 0);
+    } catch (err) {
+      console.error("Failed to count eligible Playing XI participants", formatDbError(err));
+    }
+  }
+
+  const uniqueKeys = new Set();
+  for (const [socketId, user] of room.users.entries()) {
+    if (room.disqualified.has(socketId) || !Array.isArray(user?.team)) continue;
+    uniqueKeys.add(getPersistentUserKey(user.userId) || `username:${user.username}`);
+  }
+  return uniqueKeys.size;
+}
+
+function getPlaying11SubmissionCount(room) {
+  if (!room) return 0;
+  const uniqueKeys = new Set();
+  for (const [socketId, entry] of room.playing11.entries()) {
+    const user = room.users.get(socketId);
+    uniqueKeys.add(
+      getPersistentUserKey(user?.userId) ||
+        `username:${entry?.username || user?.username || socketId}`
+    );
+  }
+  return uniqueKeys.size;
 }
 
 function setRoomStatus(room, status) {
@@ -400,6 +458,7 @@ function migrateSocketIdentity(room, previousSocketId, nextSocketId) {
   moveSetMembership(room.withdrawnUsers, previousSocketId, nextSocketId);
   moveSetMembership(room.disqualified, previousSocketId, nextSocketId);
   moveMapMembership(room.playing11, previousSocketId, nextSocketId);
+  moveMapMembership(room.playing11Drafts, previousSocketId, nextSocketId);
 }
 
 function getPersistentUserKey(userId) {
@@ -438,6 +497,20 @@ function serializePlaying11Entries(room) {
       username: entry?.username || room.users.get(runtimeKey)?.username || null,
       teamName: entry?.teamName || room.users.get(runtimeKey)?.teamName || null,
       breakdown: entry?.breakdown || null,
+    });
+  }
+  return entries;
+}
+
+function serializePlaying11DraftEntries(room) {
+  const entries = [];
+  for (const [runtimeKey, playerIds] of room.playing11Drafts.entries()) {
+    const userId = getRuntimeEntryUserId(room, runtimeKey);
+    if (!userId) continue;
+
+    entries.push({
+      userId,
+      playerIds: normalizePlayerIdList(playerIds),
     });
   }
   return entries;
@@ -652,6 +725,13 @@ async function restoreRoomFromDatabase(roomId, roomDbId, metadata = {}, preloade
         teamName: entry?.teamName || roomUser?.teamName || null,
         breakdown: entry?.breakdown || null,
       });
+    }
+
+    room.playing11Drafts = new Map();
+    for (const entry of Array.isArray(recovered?.playing11Drafts) ? recovered.playing11Drafts : []) {
+      const runtimeKey = persistedUserMap.get(Number(entry?.userId));
+      if (!runtimeKey) continue;
+      room.playing11Drafts.set(runtimeKey, normalizePlayerIdList(entry?.playerIds));
     }
 
     if (room.status === "running") {
@@ -1064,6 +1144,7 @@ async function persistAuctionState(roomId) {
     withdrawnUserIds: serializeRuntimeUserIds(room, room.withdrawnUsers),
     disqualifiedUserIds: serializeRuntimeUserIds(room, room.disqualified),
     playing11: serializePlaying11Entries(room),
+    playing11Drafts: serializePlaying11DraftEntries(room),
     selectionStartTime: room.selectionStartTime,
     selectDeadline: room.selectDeadline,
   };
@@ -1084,6 +1165,96 @@ async function persistAuctionState(roomId) {
   } catch (err) {
     console.error(`Failed to persist auction state for room ${roomId}`, err.message);
   }
+}
+
+async function getResolvedPlayerIds(roomDbId, playerIds = []) {
+  const uniqueIds = Array.from(
+    new Set(
+      (Array.isArray(playerIds) ? playerIds : [])
+        .map((value) => Number(value))
+        .filter((value) => Number.isInteger(value) && value > 0)
+    )
+  );
+  if (!roomDbId || uniqueIds.length === 0) {
+    return new Set();
+  }
+
+  const placeholders = uniqueIds.map(() => "?").join(", ");
+  const params = [roomDbId, ...uniqueIds];
+
+  try {
+    const [soldRows] = await pool.query(
+      `SELECT DISTINCT player_id AS "playerId"
+       FROM team_players
+       WHERE room_id = ?
+         AND player_id IN (${placeholders})`,
+      params
+    );
+    const [unsoldRows] = await pool.query(
+      `SELECT DISTINCT player_id AS "playerId"
+       FROM unsold_players
+       WHERE room_id = ?
+         AND player_id IN (${placeholders})`,
+      params
+    );
+
+    return new Set(
+      [...soldRows, ...unsoldRows]
+        .map((row) => Number(row.playerId))
+        .filter((value) => Number.isInteger(value) && value > 0)
+    );
+  } catch (err) {
+    console.error("Failed to load resolved players", formatDbError(err));
+    return new Set();
+  }
+}
+
+async function recoverMissedPlayers(roomId, { beforeIndex = null, excludeSetName = null, reason = "recovery" } = {}) {
+  const room = rooms.get(roomId);
+  if (!room || !room.dbId) return false;
+
+  const upperBound = Number.isInteger(beforeIndex) ? Math.max(0, beforeIndex) : room.playersQueue.length;
+  const candidates = room.playersQueue
+    .slice(0, upperBound)
+    .filter((player) => player && (!excludeSetName || player.setName !== excludeSetName));
+
+  if (!candidates.length) return false;
+
+  const resolvedPlayerIds = await getResolvedPlayerIds(
+    room.dbId,
+    candidates.map((player) => player.id)
+  );
+  const recoveredPlayers = [];
+  const seen = new Set();
+
+  for (const player of candidates) {
+    const playerId = Number(player.id);
+    if (!Number.isInteger(playerId) || playerId <= 0) continue;
+    if (seen.has(playerId) || resolvedPlayerIds.has(playerId)) continue;
+    seen.add(playerId);
+    recoveredPlayers.push({ ...player });
+  }
+
+  if (!recoveredPlayers.length) return false;
+
+  const insertAt = Number.isInteger(beforeIndex)
+    ? Math.max(0, Math.min(beforeIndex, room.playersQueue.length))
+    : Math.max(0, Math.min(room.idx, room.playersQueue.length));
+
+  room.playersQueue.splice(insertAt, 0, ...recoveredPlayers);
+  room.idx = insertAt;
+  touchRoomActivity(room);
+  emitQueueUpdate(roomId);
+  io.to(roomId).emit("chat_message", {
+    user: "SYSTEM",
+    text: `Re-queued ${recoveredPlayers.length} skipped player${recoveredPlayers.length === 1 ? "" : "s"} for auction review before continuing.`,
+    ts: Date.now(),
+  });
+  console.warn(
+    `Recovered ${recoveredPlayers.length} unresolved queued player(s) in room ${roomId} before ${reason}`
+  );
+  await persistAuctionState(roomId);
+  return true;
 }
 
 async function startNextPlayer(roomId) {
@@ -1128,6 +1299,14 @@ async function startNextPlayer(roomId) {
   }
 
   if (!nextPlayer) {
+    const recoveredBeforeEnd = await recoverMissedPlayers(roomId, {
+      beforeIndex: room.playersQueue.length,
+      reason: "auction end",
+    });
+    if (recoveredBeforeEnd) {
+      startNextPlayer(roomId);
+      return;
+    }
     endAuction(roomId);
     return;
   }
@@ -1136,6 +1315,16 @@ async function startNextPlayer(roomId) {
   const isNewSet = !room.currentPlayer || room.currentPlayer.setName !== player.setName;
 
   if (isNewSet) {
+    const recoveredBeforeSetChange = await recoverMissedPlayers(roomId, {
+      beforeIndex: Math.max(0, room.idx - 1),
+      excludeSetName: player.setName,
+      reason: `set change to ${player.setName}`,
+    });
+    if (recoveredBeforeSetChange) {
+      startNextPlayer(roomId);
+      return;
+    }
+
     io.to(roomId).emit("set_transition", { setName: player.setName });
     // Wait for the transition animation to play before showing the player
     setTimeout(async () => {
@@ -1374,8 +1563,11 @@ async function finalizeBid(roomId) {
         duplicatedSaleIgnored: saleAlreadyExists && !salePersisted,
       });
     } else {
-      // Record as unsold if it's a room with DB
-      if (room.dbId) {
+      // Only re-queue if no user manually interacted with the player (no bids, no manual passes, no skip votes)
+      // This handles cases where the system might have skipped them incorrectly.
+      const noUserInteraction = room.passedUsers.size === 0 && room.skipPoolUsers.size === 0 && room.bidHistory.length === 0;
+
+      if (room.dbId && !noUserInteraction) {
         try {
           await pool.query(
             "INSERT INTO unsold_players (room_id, player_id) VALUES (?, ?) ON CONFLICT DO NOTHING",
@@ -1390,10 +1582,6 @@ async function finalizeBid(roomId) {
         winner: null,
       });
 
-      // Only re-queue if no user manually interacted with the player (no bids, no manual passes, no skip votes)
-      // This handles cases where the system might have skipped them incorrectly.
-      const noUserInteraction = room.passedUsers.size === 0 && room.skipPoolUsers.size === 0 && room.bidHistory.length === 0;
-      
       if (noUserInteraction) {
         console.log(`Sudden skip detected for ${soldPlayer.name}. Re-queueing in original set: ${soldPlayer.setName}`);
         // Insert back into the queue right after the current position to auction again soon
@@ -1507,8 +1695,12 @@ function endAuction(roomId) {
   });
 }
 
-function buildAutoLineup(team) {
+function buildAutoLineup(team, lockedPlayerIds = []) {
   const isOverseas = (p) => (p.country || "").toLowerCase() !== "india";
+  const lockedIds = normalizePlayerIdList(lockedPlayerIds);
+  const teamById = new Map((Array.isArray(team) ? team : []).map((player) => [Number(player.id), player]));
+  const lockedLineup = lockedIds.map((playerId) => teamById.get(playerId)).filter(Boolean);
+  const lockedIdSet = new Set(lockedLineup.map((player) => Number(player.id)));
 
   const isValid = (lineup) => {
     if (lineup.length !== 11) return false;
@@ -1533,6 +1725,8 @@ function buildAutoLineup(team) {
     return bats >= 3 && bowls >= 2 && wks >= 1 && ars <= 4 && overseas <= 4;
   };
 
+  if (lockedLineup.length > 11) return null;
+
   const shuffleArray = (array) => {
     const arr = [...array];
     for (let i = arr.length - 1; i > 0; i--) {
@@ -1545,9 +1739,11 @@ function buildAutoLineup(team) {
   // Try many random combinations to find a valid one
   // This is more robust than greedy for meeting multiple constraints
   for (let i = 0; i < 1000; i++) {
-    const shuffled = shuffleArray(team);
-    const lineup = [];
-    const ownedIds = new Set();
+    const shuffled = shuffleArray(
+      (Array.isArray(team) ? team : []).filter((player) => !lockedIdSet.has(Number(player.id)))
+    );
+    const lineup = [...lockedLineup];
+    const ownedIds = new Set(lockedLineup.map((player) => Number(player.id)));
 
     // Fill to 11
     for (const p of shuffled) {
@@ -1579,7 +1775,8 @@ async function autoFinalizePlaying11(roomId) {
     const user = room.users.get(sid);
     if (!user || !user.team) continue;
 
-    const lineup = buildAutoLineup(user.team);
+    const savedDraftIds = room.playing11Drafts.get(sid) || [];
+    const lineup = buildAutoLineup(user.team, savedDraftIds);
     if (lineup) {
       const evalResult = evaluatePlaying11(room, sid, lineup.map((p) => p.id));
       if (evalResult.ok) {
@@ -1596,6 +1793,7 @@ async function autoFinalizePlaying11(roomId) {
               .catch((err) => console.error("Failed to persist playing11", formatDbError(err)))
           );
         }
+        room.playing11Drafts.delete(sid);
       } else {
         disqualified.add(sid);
       }
@@ -1806,14 +2004,23 @@ io.on("connection", (socket) => {
       }
     }
 
-    let cleanName = authenticatedSession?.username || (username || "").trim() || `Player-${socket.id.slice(-4)}`;
-    let cleanTeam = (teamName || "").trim() || null;
+    const providedUsername = (username || "").trim();
+    const rememberedUsername = (socket.data.username || "").trim();
+    const providedTeamName = (teamName || "").trim();
+    const rememberedTeamName = (socket.data.teamName || "").trim();
+    let cleanName =
+      authenticatedSession?.username ||
+      providedUsername ||
+      rememberedUsername ||
+      `Player-${socket.id.slice(-4)}`;
+    let cleanTeam = providedTeamName || rememberedTeamName || null;
     const requestedVisibility =
       visibility === "public" ? "public" : visibility === "private" ? "private" : null;
     socket.data.roomId = roomId;
     socket.data.username = cleanName;
+    socket.data.teamName = cleanTeam;
 
-    let userId = authenticatedSession?.userId || null;
+    let userId = authenticatedSession?.userId || socket.data.userId || null;
     let roomDbId = null;
     let roomCreatorUserId = null;
     let roomCreatedAt = null;
@@ -1851,6 +2058,7 @@ io.on("connection", (socket) => {
       }
 
       socket.data.username = cleanName;
+      socket.data.userId = userId;
 
       let latestSession = await getLatestRoomSession(pool, roomId);
       latestStoredState = latestSession?.id ? await loadStoredAuctionState(latestSession.id).catch(() => null) : null;
@@ -1961,6 +2169,7 @@ io.on("connection", (socket) => {
     });
 
     socket.data.userId = userId;
+    socket.data.teamName = cleanTeam || existingUser?.teamName || null;
     if (!existingUser) {
       [existingSocketId, existingUser] = findRoomUser(room, userId, cleanName);
     }
@@ -2072,6 +2281,8 @@ io.on("connection", (socket) => {
       deadline: room.selectDeadline,
       selectionStartTime: room.selectionStartTime,
       timer: getTimerSnapshot(room),
+      savedPlaying11: room.playing11.get(socket.id)?.playerIds || [],
+      playing11Draft: room.playing11Drafts.get(socket.id) || [],
       results,
       winner
     });
@@ -2172,6 +2383,7 @@ io.on("connection", (socket) => {
     room.highestBidderName = null;
     room.finalizingBid = false;
     room.playing11 = new Map();
+    room.playing11Drafts = new Map();
     room.disqualified = new Set();
     room.selectionStartTime = null;
     room.selectDeadline = null;
@@ -2320,7 +2532,7 @@ io.on("connection", (socket) => {
     }
   });
 
-  socket.on("submit_playing11", (payload) => {
+  socket.on("submit_playing11", async (payload) => {
     const roomId = socket.data.roomId;
     const room = rooms.get(roomId);
     if (!room) return;
@@ -2329,6 +2541,10 @@ io.on("connection", (socket) => {
     if (room.selectDeadline && Date.now() > room.selectDeadline) return;
     if (room.disqualified.has(socket.id)) {
       socket.emit("playing11_error", { reason: "Disqualified: insufficient squad to form valid XI" });
+      return;
+    }
+    if (room.playing11.has(socket.id)) {
+      socket.emit("playing11_error", { reason: "Playing XI already locked for this team." });
       return;
     }
     const ids = Array.isArray(payload?.playerIds) ? payload.playerIds.map(Number) : [];
@@ -2347,6 +2563,7 @@ io.on("connection", (socket) => {
       teamName: user?.teamName || null,
       playerNames: lineup.map(p => p.name)
     });
+    room.playing11Drafts.delete(socket.id);
 
     if (room.dbId && user?.userId) {
       persistPlaying11(room.dbId, user.userId, ids, evalResult.score)
@@ -2354,8 +2571,8 @@ io.on("connection", (socket) => {
     }
     persistAuctionState(roomId);
 
-    const eligibleParticipantCount = getEligiblePlaying11Participants(room).length;
-    const submissions = room.playing11.size;
+    const eligibleParticipantCount = await getEligiblePlaying11SubmissionTarget(room);
+    const submissions = getPlaying11SubmissionCount(room);
 
     if (eligibleParticipantCount > 0 && submissions >= eligibleParticipantCount) {
       autoFinalizePlaying11(roomId);
@@ -2363,8 +2580,21 @@ io.on("connection", (socket) => {
       socket.emit("playing11_ack", {
         ok: true,
         pending: Math.max(0, eligibleParticipantCount - submissions),
+        playerIds: ids,
       });
     }
+  });
+
+  socket.on("update_playing11_draft", (payload) => {
+    const roomId = socket.data.roomId;
+    const room = rooms.get(roomId);
+    if (!room || room.status !== "picking") return;
+    if (room.disqualified.has(socket.id) || room.playing11.has(socket.id)) return;
+
+    const ids = normalizePlayerIdList(payload?.playerIds).slice(0, 11);
+    room.playing11Drafts.set(socket.id, ids);
+    touchRoomActivity(room);
+    persistAuctionState(roomId);
   });
 
   socket.on("leave_room", ({ roomId } = {}) => {
@@ -2404,6 +2634,7 @@ io.on("connection", (socket) => {
     room.withdrawnUsers.delete(socket.id);
     room.disqualified.delete(socket.id);
     room.playing11.delete(socket.id);
+    room.playing11Drafts.delete(socket.id);
 
     if (room.highestBidder === socket.id) {
       room.highestBidder = null;
@@ -2430,6 +2661,7 @@ io.on("connection", (socket) => {
     const timeoutId = setTimeout(() => {
       if (room.users.has(socket.id)) {
         room.users.delete(socket.id);
+        room.playing11Drafts.delete(socket.id);
         room.disconnectTimeouts.delete(socket.id);
         broadcastPlayers(roomId);
         console.log(`User ${socket.data.username} removed from room ${roomId} after grace period`);

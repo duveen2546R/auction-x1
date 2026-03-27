@@ -242,6 +242,41 @@ export default function History() {
                     )}
                   </section>
                 </div>
+
+                <section className="space-y-4 border-t border-white/5 pt-6">
+                  <div className="flex items-center justify-between">
+                    <h2 className="text-xs font-black uppercase tracking-widest italic text-white">Your Auction Squad</h2>
+                    <span className="text-[10px] font-black uppercase tracking-widest text-slate-500">
+                      {item.yourSquad?.length || 0} Players
+                    </span>
+                  </div>
+
+                  {item.yourSquad?.length ? (
+                    <div className="grid gap-3 md:grid-cols-2">
+                      {item.yourSquad.map((player) => (
+                        <div
+                          key={`${item.roomId}-${player.id}`}
+                          className="rounded-2xl border border-white/5 bg-black/20 px-4 py-3"
+                        >
+                          <p className="text-sm font-black uppercase italic tracking-tight text-white">
+                            {player.name}
+                          </p>
+                          <div className="mt-2 flex flex-wrap items-center gap-3 text-[10px] font-black uppercase tracking-widest text-slate-500">
+                            <span>{player.role}</span>
+                            <span>{player.country}</span>
+                            <span>₹{Number(player.price || 0).toFixed(2)} Cr</span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="rounded-2xl border border-white/5 bg-black/20 px-4 py-6 text-center">
+                      <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-500">
+                        No squad archive was found for this room yet.
+                      </p>
+                    </div>
+                  )}
+                </section>
               </article>
             ))
           ) : (

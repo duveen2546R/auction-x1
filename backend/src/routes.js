@@ -400,6 +400,22 @@ router.get("/user/history", requireAuth, async (req, res) => {
       [roomIds]
     );
 
+    const [squadRows] = await pool.query(
+      `SELECT tp.room_id AS "roomId", tp.user_id AS "userId",
+              c.id, c.name, c.role, c.country, tp.price
+       FROM team_players tp
+       JOIN (
+         SELECT room_id, user_id, player_id, MAX(id) AS latest_id
+         FROM team_players
+         WHERE room_id = ANY(?::int[]) AND user_id = ?
+         GROUP BY room_id, user_id, player_id
+       ) latest ON latest.latest_id = tp.id
+       JOIN cricketers c ON c.id = tp.player_id
+       WHERE tp.room_id = ANY(?::int[]) AND tp.user_id = ?
+       ORDER BY tp.room_id DESC, c.role, c.name`,
+      [roomIds, req.auth.userId, roomIds, req.auth.userId]
+    );
+
     const allPlayerIds = Array.from(
       new Set(
         leaderboardRows.flatMap((row) => parseLineupIds(row.lineup))
@@ -437,6 +453,20 @@ router.get("/user/history", requireAuth, async (req, res) => {
       leaderboardByRoom.set(roomId, existingEntries);
     }
 
+    const squadByRoom = new Map();
+    for (const row of squadRows) {
+      const roomId = Number(row.roomId);
+      const existingEntries = squadByRoom.get(roomId) || [];
+      existingEntries.push({
+        id: Number(row.id),
+        name: row.name,
+        role: row.role,
+        country: row.country,
+        price: Number(row.price || 0),
+      });
+      squadByRoom.set(roomId, existingEntries);
+    }
+
     const history = rooms.map((room) => {
       const canOpen = isRuntimeRoomOpenable(room.roomCode, room.id);
       const leaderboard = (leaderboardByRoom.get(Number(room.id)) || []).map((entry, index) => ({
@@ -468,6 +498,7 @@ router.get("/user/history", requireAuth, async (req, res) => {
         winnerName,
         yourScore: typeof currentUserEntry?.score === "number" ? currentUserEntry.score : null,
         yourPlaying11: currentUserEntry?.playing11 || [],
+        yourSquad: squadByRoom.get(Number(room.id)) || [],
         canOpen,
         leaderboard,
       };

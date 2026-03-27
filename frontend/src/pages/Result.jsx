@@ -50,6 +50,7 @@ export default function Result() {
     const deadline = state?.deadline || null;
     const [selected, setSelected] = useState([]);
     const [submitting, setSubmitting] = useState(false);
+    const [locked, setLocked] = useState(false);
     const [error, setError] = useState(null);
     const [results, setResults] = useState(Array.isArray(state?.results) ? state.results : null);
     const [winner, setWinner] = useState(state?.winner || null);
@@ -82,6 +83,7 @@ export default function Result() {
             setResults(payload.results);
             setWinner(payload.winner);
             setSubmitting(false);
+            setLocked(true);
         };
         const onErr = (payload) => {
             setError(payload.reason);
@@ -96,7 +98,13 @@ export default function Result() {
 
         socket.on("playing11_results", onResults);
         socket.on("playing11_error", onErr);
-        socket.on("playing11_ack", () => setSubmitting(true));
+        socket.on("playing11_ack", (payload) => {
+            setSubmitting(false);
+            setLocked(true);
+            if (Array.isArray(payload?.playerIds)) {
+                setSelected(payload.playerIds);
+            }
+        });
         socket.on("room_closed", onRoomClosed);
         return () => {
             socket.off("playing11_results", onResults);
@@ -132,15 +140,34 @@ export default function Result() {
             if (payload.winner) setWinner(payload.winner);
             if (payload.roomStatus === "finished_finalized") {
                 setSubmitting(false);
+                setLocked(true);
+            }
+            if (Array.isArray(payload.savedPlaying11) && payload.savedPlaying11.length) {
+                setSelected(payload.savedPlaying11);
+                setLocked(true);
+            } else if (Array.isArray(payload.playing11Draft) && payload.playing11Draft.length) {
+                setSelected(payload.playing11Draft);
             }
         };
         socket.on("join_ack", onJoinAck);
         return () => socket.off("join_ack", onJoinAck);
     }, []);
 
+    useEffect(() => {
+        if (results) {
+            setLocked(true);
+        }
+    }, [results]);
+
     const validation = useMemo(() => validateLineup(team, selected), [team, selected]);
 
+    useEffect(() => {
+        if (!roomId || isDisqualified || locked) return;
+        socket.emit("update_playing11_draft", { playerIds: selected });
+    }, [roomId, selected, isDisqualified, locked]);
+
     const toggle = (id) => {
+        if (locked || submitting || isDisqualified) return;
         if (selected.includes(id)) {
             setSelected(selected.filter((x) => x !== id));
         } else {
@@ -151,7 +178,7 @@ export default function Result() {
     };
 
     const submit = () => {
-        if (isDisqualified) return;
+        if (isDisqualified || locked) return;
         setError(null);
         const v = validateLineup(team, selected);
         if (!v.ok) {
@@ -265,7 +292,7 @@ export default function Result() {
                                                 checked 
                                                 ? "bg-accent/10 border-accent/30 shadow-[0_0_20px_rgba(var(--accent-rgb),0.1)]" 
                                                 : "bg-white/5 border-white/5 hover:bg-white/10"
-                                            }`}
+                                            } ${locked || submitting || isDisqualified ? "opacity-70 cursor-not-allowed" : ""}`}
                                             onClick={() => toggle(p.id)}
                                         >
                                             <div className="flex items-center gap-4">
@@ -332,9 +359,11 @@ export default function Result() {
                                 <button 
                                     className="primary-btn w-full !py-4 !rounded-xl text-sm font-black tracking-[0.2em] uppercase italic disabled:opacity-30 disabled:cursor-not-allowed" 
                                     onClick={submit} 
-                                    disabled={!validation.ok || submitting || isDisqualified}
+                                    disabled={!validation.ok || submitting || isDisqualified || locked}
                                 >
-                                    {submitting ? (
+                                    {locked ? (
+                                        "PLAYING XI LOCKED"
+                                    ) : submitting ? (
                                         <span className="flex items-center justify-center gap-2">
                                             <span className="w-2 h-2 rounded-full bg-white animate-pulse"></span>
                                             AWAITING ALL TEAMS...
