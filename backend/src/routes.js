@@ -4,7 +4,7 @@ import { loadPlayers } from "./playerStore.js";
 import { loadTeams } from "./teamStore.js";
 import { hashPassword, signAuthToken, verifyAuthToken, verifyPassword } from "./auth.js";
 import { resolveRoom } from "./roomSessions.js";
-import { isRuntimeRoomOpenable } from "./runtimeRooms.js";
+import { getRuntimeRoomOpenInfo } from "./runtimeRooms.js";
 
 const router = express.Router();
 
@@ -82,6 +82,52 @@ function parseLineupIds(lineup) {
   return lineup.map((value) => Number(value)).filter((value) => Number.isInteger(value) && value > 0);
 }
 
+const RESUMABLE_ROOM_STATUSES = new Set([
+  "waiting",
+  "starting",
+  "transitioning",
+  "running",
+  "sold",
+  "picking",
+  "finished_finalized",
+]);
+
+function getFallbackRoomStatus(roomStatus) {
+  return roomStatus === "ongoing" ? "running" : String(roomStatus || "waiting").trim();
+}
+
+function buildStoredRoomOpenInfo(room, storedState) {
+  const runtimeInfo = getRuntimeRoomOpenInfo(room.roomCode, room.id);
+  if (runtimeInfo.canOpen) {
+    return runtimeInfo;
+  }
+
+  const status = String(storedState?.status || getFallbackRoomStatus(room.status)).trim();
+  if (!RESUMABLE_ROOM_STATUSES.has(status)) {
+    return { canOpen: false, status: "closed", openTarget: null };
+  }
+
+  const deadlineMs = Number(storedState?.selectDeadline || 0);
+  const resultTimerExpired =
+    deadlineMs > 0 &&
+    Date.now() >= deadlineMs &&
+    (status === "picking" || status === "finished_finalized");
+
+  if (resultTimerExpired) {
+    return { canOpen: false, status: "closed", openTarget: null };
+  }
+
+  if (room.status === "finished" && !["picking", "finished_finalized"].includes(status)) {
+    return { canOpen: false, status: "closed", openTarget: null };
+  }
+
+  return {
+    canOpen: true,
+    status,
+    openTarget: status === "waiting" ? "lobby" : "auction",
+  };
+}
+
 router.get("/health", (_req, res) => res.json({ ok: true }));
 
 router.get("/rooms/:roomId/joinability", async (req, res) => {
@@ -96,10 +142,15 @@ router.get("/rooms/:roomId/joinability", async (req, res) => {
       return res.json({ exists: false, status: null });
     }
 
-    const exists = room.status !== "finished" || isRuntimeRoomOpenable(roomKey, room.id);
+    const [stateRows] = await pool.query(
+      "SELECT state FROM auction_state WHERE room_id = ? LIMIT 1",
+      [room.id]
+    );
+    const openInfo = buildStoredRoomOpenInfo(room, stateRows[0]?.state || null);
     return res.json({
-      exists,
-      status: exists ? room.status : "closed",
+      exists: openInfo.canOpen,
+      status: openInfo.status,
+      openTarget: openInfo.openTarget,
       roomId: Number(room.id),
       roomCode: room.roomCode,
     });
@@ -414,6 +465,16 @@ router.get("/user/history", requireAuth, async (req, res) => {
 
     const roomIds = rooms.map((room) => Number(room.id)).filter((id) => Number.isInteger(id) && id > 0);
 
+    const [stateRows] = await pool.query(
+      `SELECT DISTINCT ON (room_id)
+              room_id AS "roomId",
+              state
+       FROM auction_state
+       WHERE room_id = ANY(?::int[])
+       ORDER BY room_id, id DESC`,
+      [roomIds]
+    );
+
     const [leaderboardRows] = await pool.query(
       `SELECT p11.room_id AS "roomId", p11.user_id AS "userId", p11.score, p11.lineup,
               u.username, COALESCE(rp.team_name, u.username) AS "teamName"
@@ -492,8 +553,12 @@ router.get("/user/history", requireAuth, async (req, res) => {
       squadByRoom.set(roomId, existingEntries);
     }
 
+    const stateByRoom = new Map(
+      stateRows.map((row) => [Number(row.roomId), row.state || null])
+    );
+
     const history = rooms.map((room) => {
-      const canOpen = isRuntimeRoomOpenable(room.roomCode, room.id);
+      const openInfo = buildStoredRoomOpenInfo(room, stateByRoom.get(Number(room.id)) || null);
       const leaderboard = (leaderboardByRoom.get(Number(room.id)) || []).map((entry, index) => ({
         rank: index + 1,
         userId: entry.userId,
@@ -507,7 +572,7 @@ router.get("/user/history", requireAuth, async (req, res) => {
       );
 
       const effectiveStatus =
-        room.status === "finished" ? "finished" : canOpen ? room.status : "closed";
+        room.status === "finished" && !openInfo.canOpen ? "finished" : openInfo.status;
       const winnerName =
         leaderboard[0]?.teamName ||
         leaderboard[0]?.username ||
@@ -524,7 +589,8 @@ router.get("/user/history", requireAuth, async (req, res) => {
         yourScore: typeof currentUserEntry?.score === "number" ? currentUserEntry.score : null,
         yourPlaying11: currentUserEntry?.playing11 || [],
         yourSquad: squadByRoom.get(Number(room.id)) || [],
-        canOpen,
+        canOpen: openInfo.canOpen,
+        openTarget: openInfo.openTarget,
         leaderboard,
       };
     });

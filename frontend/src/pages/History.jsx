@@ -11,6 +11,22 @@ export default function History() {
   const apiBase = import.meta.env.VITE_API_URL || "http://localhost:5000";
   const token = getAuthToken();
   const username = getStoredUsername() || "Owner";
+  const teamName = localStorage.getItem("teamName") || "";
+
+  const openRoom = (item) => {
+    if (!item?.canOpen) return;
+
+    if (item.openTarget === "lobby") {
+      navigate(`/lobby/${item.roomCode}`, {
+        state: { username, teamName, joinIntent: "join" },
+      });
+      return;
+    }
+
+    navigate(`/auction/${item.roomCode}`, {
+      state: { username, teamName },
+    });
+  };
 
   useEffect(() => {
     if (!token) {
@@ -163,7 +179,7 @@ export default function History() {
                   {item.canOpen ? (
                     <button
                       type="button"
-                      onClick={() => navigate(`/lobby/${item.roomCode}`)}
+                      onClick={() => openRoom(item)}
                       className="rounded-xl border border-white/10 bg-white/5 px-5 py-3 text-[10px] font-black uppercase tracking-[0.2em] text-white transition hover:border-accent/30 hover:text-accent"
                     >
                       Open Room

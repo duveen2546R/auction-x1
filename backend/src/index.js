@@ -488,6 +488,57 @@ function findRoomUser(room, userId, username) {
   return [null, null];
 }
 
+async function findPersistedRoomParticipant(roomDbId, { userId, username, teamName } = {}) {
+  const numericRoomDbId = Number(roomDbId);
+  if (!Number.isInteger(numericRoomDbId) || numericRoomDbId <= 0) {
+    return null;
+  }
+
+  const filters = [];
+  const params = [numericRoomDbId];
+  const numericUserId = Number(userId);
+  const cleanUsername = String(username || "").trim();
+  const cleanTeamName = String(teamName || "").trim();
+
+  if (Number.isInteger(numericUserId) && numericUserId > 0) {
+    filters.push("rp.user_id = ?");
+    params.push(numericUserId);
+  }
+  if (cleanUsername) {
+    filters.push("LOWER(u.username) = LOWER(?)");
+    params.push(cleanUsername);
+  }
+  if (cleanTeamName) {
+    filters.push("LOWER(rp.team_name) = LOWER(?)");
+    params.push(cleanTeamName);
+  }
+
+  if (!filters.length) {
+    return null;
+  }
+
+  const [rows] = await pool.query(
+    `SELECT rp.user_id AS "userId", u.username, rp.team_name AS "teamName"
+     FROM room_players rp
+     JOIN users u ON u.id = rp.user_id
+     WHERE rp.room_id = ?
+       AND (${filters.join(" OR ")})
+     ORDER BY rp.id ASC
+     LIMIT 1`,
+    params
+  );
+
+  if (!rows.length) {
+    return null;
+  }
+
+  return {
+    userId: Number(rows[0].userId) || null,
+    username: rows[0].username || null,
+    teamName: rows[0].teamName || null,
+  };
+}
+
 function moveSetMembership(set, from, to) {
   if (from && from !== to && set.has(from)) {
     set.delete(from);
@@ -2182,6 +2233,55 @@ io.on("connection", (socket) => {
       return;
     }
 
+    if (liveRoom) {
+      let runtimeSocketId = null;
+      let runtimeUser = null;
+      const rememberedUserId = authenticatedSession?.userId || socket.data.userId || null;
+
+      [runtimeSocketId, runtimeUser] = findRoomUser(liveRoom, rememberedUserId, cleanName);
+
+      if (!runtimeUser && cleanTeam) {
+        const matchedRuntimeEntry = Array.from(liveRoom.users.entries()).find(
+          ([, roomUser]) =>
+            roomUser?.teamName &&
+            String(roomUser.teamName).toLowerCase() === String(cleanTeam).toLowerCase()
+        );
+        if (matchedRuntimeEntry) {
+          [runtimeSocketId, runtimeUser] = matchedRuntimeEntry;
+        }
+      }
+
+      if (runtimeSocketId && runtimeUser) {
+        if (liveRoom.disconnectTimeouts.has(runtimeSocketId)) {
+          clearTimeout(liveRoom.disconnectTimeouts.get(runtimeSocketId));
+          liveRoom.disconnectTimeouts.delete(runtimeSocketId);
+        }
+
+        migrateSocketIdentity(liveRoom, runtimeSocketId, socket.id);
+        const recoveredUser = liveRoom.users.get(socket.id) || runtimeUser;
+
+        socket.data.username = recoveredUser.username || cleanName;
+        socket.data.teamName = recoveredUser.teamName || cleanTeam || null;
+        socket.data.userId = recoveredUser.userId || rememberedUserId || null;
+        socket.join(roomId);
+        touchRoomActivity(liveRoom);
+
+        if (liveRoom.status === "running" && !liveRoom.timer) {
+          startTimer(roomId, { preserveElapsed: true });
+        }
+        if (liveRoom.status === "picking" && liveRoom.selectDeadline && Date.now() > Number(liveRoom.selectDeadline)) {
+          autoFinalizePlaying11(roomId);
+        }
+        if (liveRoom.status === "finished_finalized") {
+          scheduleFinishedRoomClosure(roomId, liveRoom.dbId);
+        }
+
+        broadcastPlayers(roomId);
+        emitJoinAck(socket, liveRoom);
+        return;
+      }
+    }
+
     let userId = authenticatedSession?.userId || socket.data.userId || null;
     let roomDbId = null;
     let roomCreatorUserId = null;
@@ -2194,6 +2294,7 @@ io.on("connection", (socket) => {
     let existingSocketId = null;
     let existingUser = null;
     let latestStoredState = null;
+    let matchedPersistedParticipant = null;
     try {
       if (authenticatedSession?.userId) {
         const [users] = await pool.query(
@@ -2302,18 +2403,16 @@ io.on("connection", (socket) => {
         }
       }
 
-      if (!existingUser && roomDbId && cleanTeam) {
-        const [matchedRows] = await pool.query(
-          `SELECT rp.user_id AS "userId", u.username, rp.team_name AS "teamName"
-           FROM room_players rp
-           JOIN users u ON u.id = rp.user_id
-           WHERE rp.room_id = ? AND rp.team_name = ? LIMIT 1`,
-          [roomDbId, cleanTeam]
-        );
-        if (matchedRows.length) {
-          userId = Number(matchedRows[0].userId) || userId;
-          cleanName = matchedRows[0].username || cleanName;
-          cleanTeam = matchedRows[0].teamName || cleanTeam;
+      if (!existingUser && roomDbId) {
+        matchedPersistedParticipant = await findPersistedRoomParticipant(roomDbId, {
+          userId,
+          username: cleanName,
+          teamName: cleanTeam,
+        });
+        if (matchedPersistedParticipant) {
+          userId = matchedPersistedParticipant.userId || userId;
+          cleanName = matchedPersistedParticipant.username || cleanName;
+          cleanTeam = matchedPersistedParticipant.teamName || cleanTeam;
           socket.data.username = cleanName;
           socket.data.userId = userId;
           socket.data.teamName = cleanTeam;
@@ -2324,14 +2423,16 @@ io.on("connection", (socket) => {
       // Check if auction is ongoing and user is not already registered
       const dbSessionAlreadyStarted = latestSession?.status === "ongoing";
       if (room.status !== "waiting" || dbSessionAlreadyStarted) {
-        const [existingRp] = roomDbId
-          ? await pool.query(
-              "SELECT id FROM room_players WHERE room_id = ? AND user_id = ? LIMIT 1",
-              [roomDbId, userId]
-            )
-          : [[]];
+        const [existingRp] =
+          roomDbId && userId
+            ? await pool.query(
+                "SELECT id FROM room_players WHERE room_id = ? AND user_id = ? LIMIT 1",
+                [roomDbId, userId]
+              )
+            : [[]];
         const isKnownLiveParticipant = Boolean(existingUser);
-        if (existingRp.length === 0 && !isKnownLiveParticipant) {
+        const isKnownPersistedParticipant = Boolean(matchedPersistedParticipant) || existingRp.length > 0;
+        if (existingRp.length === 0 && !isKnownLiveParticipant && !isKnownPersistedParticipant) {
           socket.emit("join_error", { reason: "Auction has already started. New participants cannot join." });
           return;
         }

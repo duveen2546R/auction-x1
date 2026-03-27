@@ -62,6 +62,19 @@ export default function Home() {
     const activeUsername = sessionToken ? accountUsername : username;
     const isAuthenticated = Boolean(sessionToken);
 
+    const openExistingRoom = (targetRoomId, openTarget) => {
+        if (openTarget === "lobby") {
+            navigate(`/lobby/${targetRoomId}`, {
+                state: { username: activeUsername, teamName, joinIntent: "join" },
+            });
+            return;
+        }
+
+        navigate(`/auction/${targetRoomId}`, {
+            state: { username: activeUsername, teamName },
+        });
+    };
+
     const createRoom = () => {
         const roomId = Math.floor(100000 + Math.random() * 900000);
         navigate(`/lobby/${roomId}`, { state: { username: activeUsername, teamName, roomVisibility, joinIntent: "create" } });
@@ -92,7 +105,7 @@ export default function Home() {
                 return;
             }
 
-            navigate(`/lobby/${targetRoomId}`, { state: { username: activeUsername, teamName, joinIntent: "join" } });
+            openExistingRoom(targetRoomId, data.openTarget);
         } catch (err) {
             setJoinError(err.message || "Unable to verify room code");
         }
