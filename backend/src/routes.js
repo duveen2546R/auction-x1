@@ -10,7 +10,7 @@ import {
   verifyAuthToken,
   verifyPassword,
 } from "./auth.js";
-import { getPasswordResetBaseUrl, sendPasswordResetEmail } from "./mailer.js";
+import { getPasswordResetBaseUrl, sendPasswordResetEmail, sendWelcomeEmail } from "./mailer.js";
 import { resolveRoom } from "./roomSessions.js";
 import { getRuntimeRoomOpenInfo } from "./runtimeRooms.js";
 
@@ -246,6 +246,10 @@ router.post("/auth/register", async (req, res) => {
       );
       user = insertResult.rows?.[0] || { id: insertResult.insertId, username, email };
     }
+
+    sendWelcomeEmail({ email, username }).catch((mailError) => {
+      console.error("Failed to send welcome email", formatDbError(mailError));
+    });
 
     return res.status(201).json(buildAuthResponse(user));
   } catch (err) {
