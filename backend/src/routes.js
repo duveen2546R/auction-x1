@@ -12,7 +12,8 @@ import {
 } from "./auth.js";
 import { getPasswordResetBaseUrl, sendPasswordResetEmail, sendWelcomeEmail } from "./mailer.js";
 import { resolveRoom } from "./roomSessions.js";
-import { getRuntimeRoomOpenInfo } from "./runtimeRooms.js";
+import { getRuntimeRoomOpenInfo, getRuntimeRoomForSession } from "./runtimeRooms.js";
+import { mergePurseEntries } from "./purseUtils.js";
 
 const router = express.Router();
 
@@ -480,7 +481,7 @@ router.get("/rooms/:roomId/players-status", async (req, res) => {
     }
 
     return res.json({
-      roomId: room.room_code,
+      roomId: room.roomCode,
       roomDbId: room.id,
       sold,
       remaining,
@@ -558,13 +559,30 @@ router.get("/rooms/:roomId/purses", async (req, res) => {
       playersByUser.set(player.userId, existing);
     }
 
-    const enrichedPurses = purses.map((entry) => ({
+    const persistedPurses = purses.map((entry) => ({
       ...entry,
       players: playersByUser.get(entry.userId) || [],
     }));
+    const runtimeRoom = getRuntimeRoomForSession(room.roomCode, room.id);
+    const runtimePurses = runtimeRoom
+      ? Array.from(runtimeRoom.users.values())
+          .filter(
+            (user) =>
+              user &&
+              (user.teamName || (Array.isArray(user.team) && user.team.length > 0))
+          )
+          .map((user) => ({
+            userId: Number(user.userId || 0) || null,
+            username: user.username || null,
+            teamName: user.teamName || null,
+            budget: Number(user.budget ?? 0),
+            players: Array.isArray(user.team) ? user.team : [],
+          }))
+      : [];
+    const enrichedPurses = mergePurseEntries(persistedPurses, runtimePurses);
 
     return res.json({
-      roomId: room.room_code,
+      roomId: room.roomCode,
       roomDbId: room.id,
       purses: enrichedPurses,
     });

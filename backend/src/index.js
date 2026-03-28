@@ -15,6 +15,7 @@ import {
 import { rooms, PUBLIC_ROOMS_CHANNEL } from "./runtimeRooms.js";
 import apiRouter from "./routes.js";
 import { sendAuctionCompletionEmail } from "./mailer.js";
+import { mergePurseEntries } from "./purseUtils.js";
 
 const app = express();
 app.use(cors());
@@ -403,6 +404,27 @@ function getActiveLobbyParticipants(room) {
   return activeSockets(room).map((socketId) => room.users.get(socketId)).filter(Boolean);
 }
 
+function countActiveMembers(room, collection) {
+  const activeIds = new Set(activeSockets(room));
+  let count = 0;
+
+  for (const runtimeKey of collection || []) {
+    if (activeIds.has(runtimeKey)) {
+      count += 1;
+    }
+  }
+
+  return count;
+}
+
+function getSkipUpdatePayload(room) {
+  return {
+    count: countActiveMembers(room, room?.skipPoolUsers),
+    total: activeSockets(room).length,
+    setName: room?.currentPlayer?.setName || null,
+  };
+}
+
 function getPublicRoomsSnapshot() {
   return Array.from(rooms.values())
     .filter((room) => room.visibility === "public" && room.status === "waiting")
@@ -471,6 +493,8 @@ function emitJoinAck(socket, room) {
     isCreator,
     isSpectator: room.blockedUsers.has(socket.id),
     isWithdrawn: room.withdrawnUsers.has(socket.id),
+    hasPassed: room.passedUsers.has(socket.id),
+    hasVotedSkip: room.skipPoolUsers.has(socket.id),
     disqualified: Array.from(room.disqualified)
       .map((sid) => room.users.get(sid)?.teamName || room.users.get(sid)?.username)
       .filter(Boolean),
@@ -493,6 +517,7 @@ function emitJoinAck(socket, room) {
     step: room.currentBid < 10 ? 0.2 : 0.5,
   });
   socket.emit("queue_update", getQueueState(room));
+  socket.emit("skip_update", getSkipUpdatePayload(room));
   socket.emit("budget_update", { budget: Number(currentUser.budget ?? 120) });
 }
 
@@ -602,22 +627,22 @@ async function findPersistedRoomParticipant(roomDbId, { userId, username, teamNa
   }
 
   const filters = [];
-  const params = [numericRoomDbId];
+  const filterParams = [];
   const numericUserId = Number(userId);
   const cleanUsername = String(username || "").trim();
   const cleanTeamName = String(teamName || "").trim();
 
   if (Number.isInteger(numericUserId) && numericUserId > 0) {
-    filters.push("rp.user_id = ?");
-    params.push(numericUserId);
+    filters.push("participant_ids.user_id = ?");
+    filterParams.push(numericUserId);
   }
   if (cleanUsername) {
     filters.push("LOWER(u.username) = LOWER(?)");
-    params.push(cleanUsername);
+    filterParams.push(cleanUsername);
   }
   if (cleanTeamName) {
     filters.push("LOWER(COALESCE(rp.team_name, t.name)) = LOWER(?)");
-    params.push(cleanTeamName);
+    filterParams.push(cleanTeamName);
   }
 
   if (!filters.length) {
@@ -625,15 +650,34 @@ async function findPersistedRoomParticipant(roomDbId, { userId, username, teamNa
   }
 
   const [rows] = await pool.query(
-    `SELECT rp.user_id AS "userId", u.username, COALESCE(rp.team_name, t.name) AS "teamName"
-     FROM room_players rp
-     JOIN users u ON u.id = rp.user_id
+    `WITH participant_ids AS (
+       SELECT user_id FROM room_players WHERE room_id = ?
+       UNION
+       SELECT user_id FROM team_players WHERE room_id = ?
+       UNION
+       SELECT user_id FROM playing11 WHERE room_id = ?
+       UNION
+       SELECT user_id FROM bids WHERE room_id = ?
+     )
+     SELECT participant_ids.user_id AS "userId",
+            u.username,
+            COALESCE(rp.team_name, t.name) AS "teamName"
+     FROM participant_ids
+     JOIN users u ON u.id = participant_ids.user_id
+     LEFT JOIN room_players rp ON rp.room_id = ? AND rp.user_id = participant_ids.user_id
      LEFT JOIN teams t ON t.id = rp.team_id
-     WHERE rp.room_id = ?
+     WHERE 1 = 1
        AND (${filters.join(" OR ")})
-     ORDER BY rp.id ASC
+     ORDER BY COALESCE(rp.id, 0) ASC, u.username ASC
      LIMIT 1`,
-    params
+    [
+      numericRoomDbId,
+      numericRoomDbId,
+      numericRoomDbId,
+      numericRoomDbId,
+      numericRoomDbId,
+      ...filterParams,
+    ]
   );
 
   if (!rows.length) {
@@ -645,6 +689,37 @@ async function findPersistedRoomParticipant(roomDbId, { userId, username, teamNa
     username: rows[0].username || null,
     teamName: rows[0].teamName || null,
   };
+}
+
+async function hasPersistedRoomPresence(roomDbId, userId) {
+  const numericRoomDbId = Number(roomDbId);
+  const numericUserId = Number(userId);
+
+  if (!Number.isInteger(numericRoomDbId) || numericRoomDbId <= 0) {
+    return false;
+  }
+
+  if (!Number.isInteger(numericUserId) || numericUserId <= 0) {
+    return false;
+  }
+
+  const [rows] = await pool.query(
+    `SELECT user_id
+     FROM (
+       SELECT user_id FROM room_players WHERE room_id = ?
+       UNION
+       SELECT user_id FROM team_players WHERE room_id = ?
+       UNION
+       SELECT user_id FROM playing11 WHERE room_id = ?
+       UNION
+       SELECT user_id FROM bids WHERE room_id = ?
+     ) participant_ids
+     WHERE user_id = ?
+     LIMIT 1`,
+    [numericRoomDbId, numericRoomDbId, numericRoomDbId, numericRoomDbId, numericUserId]
+  );
+
+  return rows.length > 0;
 }
 
 function moveSetMembership(set, from, to) {
@@ -676,6 +751,7 @@ function migrateSocketIdentity(room, previousSocketId, nextSocketId) {
   }
 
   moveSetMembership(room.passedUsers, previousSocketId, nextSocketId);
+  moveSetMembership(room.skipPoolUsers, previousSocketId, nextSocketId);
   moveSetMembership(room.blockedUsers, previousSocketId, nextSocketId);
   moveSetMembership(room.withdrawnUsers, previousSocketId, nextSocketId);
   moveSetMembership(room.disqualified, previousSocketId, nextSocketId);
@@ -1401,27 +1477,66 @@ async function getRoomPursesSnapshot(roomDbId) {
     playersByUser.set(player.userId, existing);
   }
 
-  return purses.map((entry) => ({
+  const persistedPurses = purses.map((entry) => ({
     ...entry,
     players: playersByUser.get(entry.userId) || [],
   }));
+
+  const runtimeRoom = Array.from(rooms.values()).find(
+    (candidateRoom) => Number(candidateRoom?.dbId || 0) === Number(roomDbId || 0)
+  );
+  const runtimePurses = runtimeRoom
+    ? Array.from(runtimeRoom.users.values())
+        .filter(
+          (user) =>
+            user &&
+            (user.teamName || (Array.isArray(user.team) && user.team.length > 0))
+        )
+        .map((user) => ({
+          userId: Number(user.userId || 0) || null,
+          username: user.username || null,
+          teamName: user.teamName || null,
+          budget: Number(user.budget ?? 0),
+          players: Array.isArray(user.team) ? user.team : [],
+        }))
+    : [];
+
+  return mergePurseEntries(persistedPurses, runtimePurses);
 }
 
 function broadcastPlayers(roomId) {
   const room = rooms.get(roomId);
   if (!room) return;
 
-  // Filter out spectators (blocked users) from the public franchise list
-  const players = Array.from(room.users.entries())
-    .filter(([socketId]) => !room.blockedUsers.has(socketId))
-    .map(([, u]) => ({
+  const players = activeSockets(room).map((socketId) => {
+    const u = room.users.get(socketId);
+    return {
       username: u.username,
       team: u.teamName || null,
       isCreator: Boolean(room.creatorUserId && u.userId === room.creatorUserId),
-    }));
+    };
+  });
 
   io.to(roomId).emit("players_update", players);
   broadcastPublicRooms();
+}
+
+function removeRuntimeParticipant(room, runtimeKey) {
+  if (!room || !runtimeKey) return;
+
+  room.voiceUsers.delete(runtimeKey);
+  room.blockedUsers.delete(runtimeKey);
+  room.passedUsers.delete(runtimeKey);
+  room.skipPoolUsers.delete(runtimeKey);
+  room.withdrawnUsers.delete(runtimeKey);
+  room.disqualified.delete(runtimeKey);
+  room.playing11.delete(runtimeKey);
+  room.playing11Drafts.delete(runtimeKey);
+  room.users.delete(runtimeKey);
+
+  if (room.highestBidder === runtimeKey) {
+    room.highestBidder = null;
+  }
 }
 
 function startTimer(roomId, { preserveElapsed = false } = {}) {
@@ -1788,11 +1903,7 @@ async function startNextPlayer(roomId) {
 
       // Reset skip votes only on a NEW set
       room.skipPoolUsers = new Set();
-      io.to(roomId).emit("skip_update", {
-        count: 0,
-        total: activeSockets(room).length,
-        setName: player.setName
-      });
+      io.to(roomId).emit("skip_update", { ...getSkipUpdatePayload(room), setName: player.setName });
 
       emitQueueUpdate(roomId);
       startTimer(roomId);
@@ -1826,11 +1937,7 @@ async function startNextPlayer(roomId) {
   io.to(roomId).emit("bid_update", { amount: room.currentBid, by: null, history: room.bidHistory || [] });
 
   // Do NOT reset skipPoolUsers here if it's the same set
-  io.to(roomId).emit("skip_update", {
-    count: room.skipPoolUsers.size,
-    total: activeSockets(room).length,
-    setName: player.setName
-  });
+  io.to(roomId).emit("skip_update", { ...getSkipUpdatePayload(room), setName: player.setName });
 
   emitQueueUpdate(roomId);
   startTimer(roomId);
@@ -2042,7 +2149,7 @@ async function finalizeBid(roomId) {
 
     // Check if the pool skip was unanimous
     const active = activeSockets(room);
-    if (active.length > 0 && room.skipPoolUsers.size >= active.length) {
+    if (active.length > 0 && countActiveMembers(room, room.skipPoolUsers) >= active.length) {
       setTimeout(() => {
         io.to(roomId).emit("pool_skipped", { setName: room.currentPlayer?.setName });
       }, 2000); // 2s delay to let sold/unsold animation finish
@@ -2402,11 +2509,7 @@ function handleBid(socket, amount) {
   });
 
   // Broadcast update to maintain 'total' sockets but keep the skip count
-  io.to(roomId).emit("skip_update", {
-    count: room.skipPoolUsers.size,
-    total: activeSockets(room).length,
-    setName: room.currentPlayer?.setName
-  });
+  io.to(roomId).emit("skip_update", getSkipUpdatePayload(room));
 
   maybeAutoResolve(roomId, true);
   persistAuctionState(roomId);
@@ -2774,16 +2877,10 @@ io.on("connection", (socket) => {
       // Check if auction is ongoing and user is not already registered
       const dbSessionAlreadyStarted = latestSession?.status === "ongoing";
       if (room.status !== "waiting" || dbSessionAlreadyStarted) {
-        const [existingRp] =
-          roomDbId && userId
-            ? await pool.query(
-                "SELECT id FROM room_players WHERE room_id = ? AND user_id = ? LIMIT 1",
-                [roomDbId, userId]
-              )
-            : [[]];
+        const hasPersistedPresence = await hasPersistedRoomPresence(roomDbId, userId);
         const isKnownLiveParticipant = Boolean(existingUser);
-        const isKnownPersistedParticipant = Boolean(matchedPersistedParticipant) || existingRp.length > 0;
-        if (existingRp.length === 0 && !isKnownLiveParticipant && !isKnownPersistedParticipant) {
+        const isKnownPersistedParticipant = Boolean(matchedPersistedParticipant) || hasPersistedPresence;
+        if (!hasPersistedPresence && !isKnownLiveParticipant && !isKnownPersistedParticipant) {
           socket.emit("join_error", { reason: "Auction has already started. New participants cannot join." });
           return;
         }
@@ -3034,13 +3131,7 @@ io.on("connection", (socket) => {
     room.skipPoolUsers.add(socket.id);
     // Also mark as passed for the current player
     room.passedUsers.add(socket.id);
-    const active = activeSockets(room);
-
-    io.to(roomId).emit("skip_update", {
-      count: room.skipPoolUsers.size,
-      total: active.length,
-      setName: room.currentPlayer?.setName
-    });
+    io.to(roomId).emit("skip_update", getSkipUpdatePayload(room));
 
     // Notify others that this user passed via skip vote
     room.bidHistory.push({
@@ -3106,9 +3197,8 @@ io.on("connection", (socket) => {
       io.to(roomId).emit("bid_update", { amount: room.currentBid, by: room.highestBidderName, history: room.bidHistory.slice(-10) });
     }
 
-    const totalPlayers = room.users.size;
     const activeIds = activeSockets(room);
-    const everyonePassed = room.passedUsers.size >= activeIds.length;
+    const everyonePassed = countActiveMembers(room, room.passedUsers) >= activeIds.length;
 
     if (activeIds.length > 0 && everyonePassed) {
       if (room.timer) {
@@ -3273,24 +3363,18 @@ io.on("connection", (socket) => {
       return;
     }
 
-    room.users.delete(socket.id);
-    room.blockedUsers.delete(socket.id);
-    room.passedUsers.delete(socket.id);
-    room.skipPoolUsers.delete(socket.id);
-    room.withdrawnUsers.delete(socket.id);
-    room.disqualified.delete(socket.id);
-    room.playing11.delete(socket.id);
-    room.playing11Drafts.delete(socket.id);
-
-    if (room.highestBidder === socket.id) {
-      room.highestBidder = null;
-    }
+    removeRuntimeParticipant(room, socket.id);
 
     if (socket.data.roomId === resolvedRoomId) {
       delete socket.data.roomId;
     }
 
     broadcastPlayers(resolvedRoomId);
+    if (room.currentPlayer) {
+      io.to(resolvedRoomId).emit("skip_update", getSkipUpdatePayload(room));
+      maybeAutoResolve(resolvedRoomId, true);
+      persistAuctionState(resolvedRoomId);
+    }
   });
 
   socket.on("disconnect", () => {
@@ -3306,17 +3390,25 @@ io.on("connection", (socket) => {
     // Start a 10-minute (600,000 ms) grace period before removing the user from room users
     const timeoutId = setTimeout(() => {
       if (room.users.has(socket.id)) {
-        room.users.delete(socket.id);
-        room.playing11Drafts.delete(socket.id);
+        removeRuntimeParticipant(room, socket.id);
         room.disconnectTimeouts.delete(socket.id);
         broadcastPlayers(roomId);
+        if (room.currentPlayer) {
+          io.to(roomId).emit("skip_update", getSkipUpdatePayload(room));
+          maybeAutoResolve(roomId, true);
+          persistAuctionState(roomId);
+        }
         console.log(`User ${socket.data.username} removed from room ${roomId} after grace period`);
       }
     }, 600000); // 10 minutes
 
     room.disconnectTimeouts.set(socket.id, timeoutId);
-
-    io.to(roomId).emit("user_left_voice", { socketId: socket.id });
+    broadcastPlayers(roomId);
+    if (room.currentPlayer) {
+      io.to(roomId).emit("skip_update", getSkipUpdatePayload(room));
+      maybeAutoResolve(roomId, true);
+      persistAuctionState(roomId);
+    }
   });
 });
 

@@ -392,6 +392,8 @@ export default function Auction() {
             }
             if (Array.isArray(payload.bidHistory)) setBidHistory(payload.bidHistory);
             if (typeof payload.isSpectator === "boolean") setIsSpectator(payload.isSpectator);
+            if (typeof payload.hasPassed === "boolean") setHasPassed(payload.hasPassed);
+            if (typeof payload.hasVotedSkip === "boolean") setHasVotedSkip(payload.hasVotedSkip);
             
             if (payload.isWithdrawn) {
                 setEliminated(true);
