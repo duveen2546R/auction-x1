@@ -409,7 +409,7 @@ router.get("/rooms/:roomId/players-status", async (req, res) => {
     const [sold] = await pool.query(
       `SELECT 
          c.id, c.name, c.role, c.batting_rating, c.bowling_rating, c.rating, c.base_price, c.country, 
-         tp.price, COALESCE(rp.team_name, u.username) AS "soldTo"
+         tp.price, COALESCE(rp.team_name, t.name, u.username) AS "soldTo"
        FROM team_players tp
        JOIN (
          SELECT player_id, MAX(id) AS latest_id
@@ -420,6 +420,7 @@ router.get("/rooms/:roomId/players-status", async (req, res) => {
        JOIN cricketers c ON c.id = tp.player_id
        JOIN users u ON u.id = tp.user_id
        LEFT JOIN room_players rp ON rp.room_id = tp.room_id AND rp.user_id = tp.user_id
+       LEFT JOIN teams t ON t.id = rp.team_id
        WHERE tp.room_id = ?
        ORDER BY c.role, c.name`,
       [room.id, room.id]
@@ -517,7 +518,10 @@ router.get("/rooms/:roomId/purses", async (req, res) => {
     }
 
     const [purses] = await pool.query(
-      `SELECT rp.user_id AS "userId", u.username, rp.team_name AS "teamName", rp.budget
+      `SELECT rp.user_id AS "userId",
+              u.username,
+              COALESCE(rp.team_name, t.name) AS "teamName",
+              rp.budget
        FROM room_players rp
        JOIN (
          SELECT user_id, MAX(id) AS latest_id
@@ -526,8 +530,9 @@ router.get("/rooms/:roomId/purses", async (req, res) => {
          GROUP BY user_id
        ) latest ON latest.latest_id = rp.id
        JOIN users u ON u.id = rp.user_id
+       LEFT JOIN teams t ON t.id = rp.team_id
        WHERE rp.room_id = ?
-       ORDER BY rp.team_name, u.username`,
+       ORDER BY COALESCE(rp.team_name, t.name), u.username`,
       [room.id, room.id]
     );
 
@@ -576,16 +581,26 @@ router.get("/rooms/:roomId/purses", async (req, res) => {
 router.get("/user/history", requireAuth, async (req, res) => {
   try {
     const [rooms] = await pool.query(
-      `SELECT r.id, r.room_code AS "roomCode", r.status, r.created_at AS "createdAt",
+      `WITH participant_rooms AS (
+         SELECT room_id FROM room_players WHERE user_id = ?
+         UNION
+         SELECT room_id FROM team_players WHERE user_id = ?
+         UNION
+         SELECT room_id FROM playing11 WHERE user_id = ?
+         UNION
+         SELECT room_id FROM bids WHERE user_id = ?
+       )
+       SELECT r.id, r.room_code AS "roomCode", r.status, r.created_at AS "createdAt",
               r.session_number AS "sessionNumber",
-              COALESCE(rp.team_name, u.username) AS "teamName"
-       FROM room_players rp
-       JOIN rooms r ON r.id = rp.room_id
-       JOIN users u ON u.id = rp.user_id
-       WHERE rp.user_id = ?
+              COALESCE(rp.team_name, t.name, u.username) AS "teamName"
+       FROM participant_rooms pr
+       JOIN rooms r ON r.id = pr.room_id
+       JOIN users u ON u.id = ?
+       LEFT JOIN room_players rp ON rp.room_id = r.id AND rp.user_id = u.id
+       LEFT JOIN teams t ON t.id = rp.team_id
        ORDER BY r.created_at DESC, r.id DESC
        LIMIT 10`,
-      [req.auth.userId]
+      [req.auth.userId, req.auth.userId, req.auth.userId, req.auth.userId, req.auth.userId]
     );
 
     if (!rooms.length) {
@@ -606,12 +621,13 @@ router.get("/user/history", requireAuth, async (req, res) => {
 
     const [leaderboardRows] = await pool.query(
       `SELECT p11.room_id AS "roomId", p11.user_id AS "userId", p11.score, p11.lineup,
-              u.username, COALESCE(rp.team_name, u.username) AS "teamName"
+              u.username, COALESCE(rp.team_name, t.name, u.username) AS "teamName"
        FROM playing11 p11
        JOIN users u ON u.id = p11.user_id
        LEFT JOIN room_players rp ON rp.room_id = p11.room_id AND rp.user_id = p11.user_id
+       LEFT JOIN teams t ON t.id = rp.team_id
        WHERE p11.room_id = ANY(?::int[])
-       ORDER BY p11.room_id, p11.score DESC, COALESCE(rp.team_name, u.username), u.username`,
+       ORDER BY p11.room_id, p11.score DESC, COALESCE(rp.team_name, t.name, u.username), u.username`,
       [roomIds]
     );
 

@@ -143,10 +143,19 @@ function activeSockets(room) {
   );
 }
 
+function getUniqueRuntimeParticipantKeys(room) {
+  const uniqueParticipants = new Map();
+  for (const [socketId, user] of room.users.entries()) {
+    const identityKey =
+      getStableIdentityKeyFromParts(user?.userId, user?.teamName, user?.username) || `socket:${socketId}`;
+    uniqueParticipants.set(identityKey, socketId);
+  }
+  return Array.from(uniqueParticipants.values());
+}
+
 function getEligiblePlaying11Participants(room) {
-  return Array.from(room.users.entries())
-    .filter(([socketId, user]) => !room.disqualified.has(socketId) && Array.isArray(user?.team))
-    .map(([socketId]) => socketId);
+  return getUniqueRuntimeParticipantKeys(room)
+    .filter((socketId) => !room.disqualified.has(socketId) && Array.isArray(room.users.get(socketId)?.team));
 }
 
 function getDisqualifiedUserIds(room) {
@@ -155,8 +164,99 @@ function getDisqualifiedUserIds(room) {
     .filter((userId) => Number.isInteger(userId) && userId > 0);
 }
 
+function normalizeIdentityValue(value) {
+  const cleanValue = String(value || "").trim().toLowerCase();
+  return cleanValue || null;
+}
+
+function getStableIdentityKeyFromParts(userId, teamName, username) {
+  const persistentUserKey = getPersistentUserKey(userId);
+  if (persistentUserKey) return persistentUserKey;
+
+  const normalizedTeamName = normalizeIdentityValue(teamName);
+  if (normalizedTeamName) return `team:${normalizedTeamName}`;
+
+  const normalizedUsername = normalizeIdentityValue(username);
+  if (normalizedUsername) return `username:${normalizedUsername}`;
+
+  return null;
+}
+
+function getRuntimeIdentityKey(room, runtimeKey, fallbackIdentity = {}) {
+  const roomUser = room?.users?.get(runtimeKey) || {};
+  return getStableIdentityKeyFromParts(
+    roomUser.userId ?? fallbackIdentity.userId,
+    roomUser.teamName ?? fallbackIdentity.teamName,
+    roomUser.username ?? fallbackIdentity.username
+  );
+}
+
+function findMatchingRuntimeKeyInCollection(collection, room, runtimeKey, fallbackIdentity = {}) {
+  if (!collection) return null;
+  if ((collection instanceof Map || collection instanceof Set) && collection.has(runtimeKey)) {
+    return runtimeKey;
+  }
+
+  const targetIdentityKey = getRuntimeIdentityKey(room, runtimeKey, fallbackIdentity);
+  if (!targetIdentityKey) return null;
+
+  if (collection instanceof Map) {
+    for (const [candidateKey, candidateValue] of collection.entries()) {
+      const candidateIdentityKey = getRuntimeIdentityKey(room, candidateKey, {
+        userId: candidateValue?.userId,
+        teamName: candidateValue?.teamName,
+        username: candidateValue?.username,
+      });
+      if (candidateIdentityKey === targetIdentityKey) {
+        return candidateKey;
+      }
+    }
+    return null;
+  }
+
+  for (const candidateKey of collection.values()) {
+    if (getRuntimeIdentityKey(room, candidateKey) === targetIdentityKey) {
+      return candidateKey;
+    }
+  }
+
+  return null;
+}
+
+function getPlaying11EntryForRuntime(room, runtimeKey, fallbackIdentity = {}) {
+  const matchedKey = findMatchingRuntimeKeyInCollection(
+    room?.playing11,
+    room,
+    runtimeKey,
+    fallbackIdentity
+  );
+  return matchedKey ? room.playing11.get(matchedKey) : null;
+}
+
+function getPlaying11DraftForRuntime(room, runtimeKey, fallbackIdentity = {}) {
+  const matchedKey = findMatchingRuntimeKeyInCollection(
+    room?.playing11Drafts,
+    room,
+    runtimeKey,
+    fallbackIdentity
+  );
+  return matchedKey ? room.playing11Drafts.get(matchedKey) || [] : [];
+}
+
 async function getEligiblePlaying11SubmissionTarget(room) {
   if (!room) return 0;
+
+  const disqualified = room.disqualified || new Set();
+  const blockedUsers = room.blockedUsers || new Set();
+  const runtimeParticipants = new Set();
+  for (const [socketId, user] of room.users.entries()) {
+    if (disqualified.has(socketId) || blockedUsers.has(socketId) || !Array.isArray(user?.team)) continue;
+    const identityKey = getStableIdentityKeyFromParts(user?.userId, user?.teamName, user?.username);
+    if (identityKey) {
+      runtimeParticipants.add(identityKey);
+    }
+  }
+  const runtimeCount = runtimeParticipants.size;
 
   if (room.dbId) {
     const disqualifiedUserIds = getDisqualifiedUserIds(room);
@@ -170,7 +270,7 @@ async function getEligiblePlaying11SubmissionTarget(room) {
              AND user_id NOT IN (${placeholders})`,
           [room.dbId, ...disqualifiedUserIds]
         );
-        return Number(rows?.[0]?.count || 0);
+        return Math.max(runtimeCount, Number(rows?.[0]?.count || 0));
       }
 
       const [rows] = await pool.query(
@@ -179,18 +279,13 @@ async function getEligiblePlaying11SubmissionTarget(room) {
          WHERE room_id = ?`,
         [room.dbId]
       );
-      return Number(rows?.[0]?.count || 0);
+      return Math.max(runtimeCount, Number(rows?.[0]?.count || 0));
     } catch (err) {
       console.error("Failed to count eligible Playing XI participants", formatDbError(err));
     }
   }
 
-  const uniqueKeys = new Set();
-  for (const [socketId, user] of room.users.entries()) {
-    if (room.disqualified.has(socketId) || !Array.isArray(user?.team)) continue;
-    uniqueKeys.add(getPersistentUserKey(user.userId) || `username:${user.username}`);
-  }
-  return uniqueKeys.size;
+  return runtimeCount;
 }
 
 function getPlaying11SubmissionCount(room) {
@@ -198,10 +293,14 @@ function getPlaying11SubmissionCount(room) {
   const uniqueKeys = new Set();
   for (const [socketId, entry] of room.playing11.entries()) {
     const user = room.users.get(socketId);
-    uniqueKeys.add(
-      getPersistentUserKey(user?.userId) ||
-        `username:${entry?.username || user?.username || socketId}`
+    const identityKey = getStableIdentityKeyFromParts(
+      entry?.userId ?? user?.userId,
+      entry?.teamName ?? user?.teamName,
+      entry?.username ?? user?.username ?? socketId
     );
+    if (identityKey) {
+      uniqueKeys.add(identityKey);
+    }
   }
   return uniqueKeys.size;
 }
@@ -338,6 +437,13 @@ function emitJoinAck(socket, room) {
 
   const currentUser = room.users.get(socket.id) || {};
   const userId = Number(currentUser.userId || socket.data.userId || 0) || null;
+  const identityFallback = {
+    userId,
+    teamName: currentUser.teamName || socket.data.teamName || null,
+    username: currentUser.username || socket.data.username || null,
+  };
+  const savedPlaying11Entry = getPlaying11EntryForRuntime(room, socket.id, identityFallback);
+  const savedPlaying11Draft = getPlaying11DraftForRuntime(room, socket.id, identityFallback);
   const results =
     room.status === "finished_finalized"
       ? Array.from(room.playing11.values()).sort((a, b) => b.score - a.score)
@@ -371,8 +477,8 @@ function emitJoinAck(socket, room) {
     deadline: room.selectDeadline,
     selectionStartTime: room.selectionStartTime,
     timer: getTimerSnapshot(room),
-    savedPlaying11: room.playing11.get(socket.id)?.playerIds || [],
-    playing11Draft: room.playing11Drafts.get(socket.id) || [],
+    savedPlaying11: savedPlaying11Entry?.playerIds || [],
+    playing11Draft: savedPlaying11Draft,
     results,
     winner,
   });
@@ -510,7 +616,7 @@ async function findPersistedRoomParticipant(roomDbId, { userId, username, teamNa
     params.push(cleanUsername);
   }
   if (cleanTeamName) {
-    filters.push("LOWER(rp.team_name) = LOWER(?)");
+    filters.push("LOWER(COALESCE(rp.team_name, t.name)) = LOWER(?)");
     params.push(cleanTeamName);
   }
 
@@ -519,9 +625,10 @@ async function findPersistedRoomParticipant(roomDbId, { userId, username, teamNa
   }
 
   const [rows] = await pool.query(
-    `SELECT rp.user_id AS "userId", u.username, rp.team_name AS "teamName"
+    `SELECT rp.user_id AS "userId", u.username, COALESCE(rp.team_name, t.name) AS "teamName"
      FROM room_players rp
      JOIN users u ON u.id = rp.user_id
+     LEFT JOIN teams t ON t.id = rp.team_id
      WHERE rp.room_id = ?
        AND (${filters.join(" OR ")})
      ORDER BY rp.id ASC
@@ -601,7 +708,7 @@ function serializeRuntimeUserIds(room, collection) {
 function serializePlaying11Entries(room) {
   const entries = [];
   for (const [runtimeKey, entry] of room.playing11.entries()) {
-    const userId = getRuntimeEntryUserId(room, runtimeKey);
+    const userId = Number(entry?.userId || getRuntimeEntryUserId(room, runtimeKey) || 0);
     if (!userId) continue;
 
     entries.push({
@@ -670,9 +777,13 @@ function isRecoverableStoredState(state) {
 
 async function loadPersistedRoomUsers(roomDbId) {
   const [participants] = await pool.query(
-    `SELECT rp.user_id AS "userId", u.username, rp.budget, rp.team_name AS "teamName"
+    `SELECT rp.user_id AS "userId",
+            u.username,
+            rp.budget,
+            COALESCE(rp.team_name, t.name) AS "teamName"
      FROM room_players rp
      JOIN users u ON u.id = rp.user_id
+     LEFT JOIN teams t ON t.id = rp.team_id
      WHERE rp.room_id = ?
      ORDER BY rp.id ASC`,
     [roomDbId]
@@ -746,15 +857,25 @@ async function loadAuctionEmailSummary({ roomDbId, roomCode, sessionNumber, disq
   }
 
   const [participants] = await pool.query(
-    `SELECT rp.user_id AS "userId",
+    `WITH participant_ids AS (
+       SELECT user_id FROM room_players WHERE room_id = ?
+       UNION
+       SELECT user_id FROM team_players WHERE room_id = ?
+       UNION
+       SELECT user_id FROM playing11 WHERE room_id = ?
+       UNION
+       SELECT user_id FROM bids WHERE room_id = ?
+     )
+     SELECT participant_ids.user_id AS "userId",
             u.username,
             u.email,
-            COALESCE(rp.team_name, u.username) AS "teamName"
-     FROM room_players rp
-     JOIN users u ON u.id = rp.user_id
-     WHERE rp.room_id = ?
-     ORDER BY rp.id ASC`,
-    [numericRoomDbId]
+            COALESCE(rp.team_name, t.name, u.username) AS "teamName"
+     FROM participant_ids
+     JOIN users u ON u.id = participant_ids.user_id
+     LEFT JOIN room_players rp ON rp.room_id = ? AND rp.user_id = participant_ids.user_id
+     LEFT JOIN teams t ON t.id = rp.team_id
+     ORDER BY COALESCE(rp.id, 0) ASC, u.username ASC`,
+    [numericRoomDbId, numericRoomDbId, numericRoomDbId, numericRoomDbId, numericRoomDbId]
   );
 
   if (!participants.length) {
@@ -786,12 +907,13 @@ async function loadAuctionEmailSummary({ roomDbId, roomCode, sessionNumber, disq
             p11.score,
             p11.lineup,
             u.username,
-            COALESCE(rp.team_name, u.username) AS "teamName"
+            COALESCE(rp.team_name, t.name, u.username) AS "teamName"
      FROM playing11 p11
      JOIN users u ON u.id = p11.user_id
      LEFT JOIN room_players rp ON rp.room_id = p11.room_id AND rp.user_id = p11.user_id
+     LEFT JOIN teams t ON t.id = rp.team_id
      WHERE p11.room_id = ?
-     ORDER BY p11.score DESC, COALESCE(rp.team_name, u.username), u.username`,
+     ORDER BY p11.score DESC, COALESCE(rp.team_name, t.name, u.username), u.username`,
     [numericRoomDbId]
   );
 
@@ -1001,6 +1123,7 @@ async function restoreRoomFromDatabase(roomId, roomDbId, metadata = {}, preloade
         playerNames,
         username: entry?.username || roomUser?.username || null,
         teamName: entry?.teamName || roomUser?.teamName || null,
+        userId: Number(entry?.userId || roomUser?.userId || 0) || null,
         breakdown: entry?.breakdown || null,
       });
     }
@@ -1187,8 +1310,38 @@ async function ensureRoomPlayerRow(roomDbId, userId, teamName, teamId) {
   return {
     budget: Number(row?.budget ?? initialBudget),
     teamName: row?.teamName || teamName || null,
+    teamId: Number(row?.teamId || teamId || 0) || null,
     duplicateCount: 0,
   };
+}
+
+async function resolveTeamIdByName(teamName) {
+  const cleanTeamName = String(teamName || "").trim();
+  if (!cleanTeamName) return null;
+
+  const [teamRows] = await pool.query(
+    "SELECT id FROM teams WHERE LOWER(name) = LOWER(?) LIMIT 1",
+    [cleanTeamName]
+  );
+
+  return Number(teamRows?.[0]?.id || 0) || null;
+}
+
+async function ensureRoomPlayerIdentity(roomDbId, user) {
+  const numericRoomDbId = Number(roomDbId);
+  const numericUserId = Number(user?.userId || 0);
+  if (!Number.isInteger(numericRoomDbId) || numericRoomDbId <= 0) return null;
+  if (!Number.isInteger(numericUserId) || numericUserId <= 0) return null;
+
+  let teamId = null;
+  if (user?.teamName) {
+    teamId = await resolveTeamIdByName(user.teamName).catch((err) => {
+      console.warn("Failed to resolve team id for room player repair", formatDbError(err));
+      return null;
+    });
+  }
+
+  return ensureRoomPlayerRow(numericRoomDbId, numericUserId, user?.teamName || null, teamId);
 }
 
 async function persistPlaying11(roomDbId, userId, lineup, score) {
@@ -1208,7 +1361,10 @@ async function persistPlaying11(roomDbId, userId, lineup, score) {
 
 async function getRoomPursesSnapshot(roomDbId) {
   const [purses] = await pool.query(
-    `SELECT rp.user_id AS "userId", u.username, rp.team_name AS "teamName", rp.budget
+    `SELECT rp.user_id AS "userId",
+            u.username,
+            COALESCE(rp.team_name, t.name) AS "teamName",
+            rp.budget
      FROM room_players rp
      JOIN (
        SELECT user_id, MAX(id) AS latest_id
@@ -1217,8 +1373,9 @@ async function getRoomPursesSnapshot(roomDbId) {
        GROUP BY user_id
      ) latest ON latest.latest_id = rp.id
      JOIN users u ON u.id = rp.user_id
+     LEFT JOIN teams t ON t.id = rp.team_id
      WHERE rp.room_id = ?
-     ORDER BY rp.team_name, u.username`,
+     ORDER BY COALESCE(rp.team_name, t.name), u.username`,
     [roomDbId, roomDbId]
   );
 
@@ -2102,27 +2259,40 @@ async function autoFinalizePlaying11(roomId) {
   room.finalizingPlaying11 = true;
 
   try {
-    const allUserIds = Array.from(room.users.keys());
+    const allUserIds = getUniqueRuntimeParticipantKeys(room);
     const disqualified = room.disqualified || new Set();
     const persistJobs = [];
 
     for (const sid of allUserIds) {
-      if (disqualified.has(sid)) continue;
-      if (room.playing11.has(sid)) continue;
-
       const user = room.users.get(sid);
+      const identityFallback = {
+        userId: user?.userId,
+        teamName: user?.teamName,
+        username: user?.username,
+      };
+      const disqualifiedKey = findMatchingRuntimeKeyInCollection(disqualified, room, sid, identityFallback);
+      if (disqualifiedKey) continue;
+      if (findMatchingRuntimeKeyInCollection(room.playing11, room, sid, identityFallback)) continue;
       if (!user || !user.team) continue;
 
-      const savedDraftIds = room.playing11Drafts.get(sid) || [];
+      const savedDraftIds = getPlaying11DraftForRuntime(room, sid, identityFallback);
       const lineup = buildAutoLineup(user.team, savedDraftIds);
       if (lineup) {
         const evalResult = evaluatePlaying11(room, sid, lineup.map((p) => p.id));
         if (evalResult.ok) {
+          if (room.dbId && user.userId) {
+            persistJobs.push(
+              ensureRoomPlayerIdentity(room.dbId, user).catch((err) =>
+                console.error("Failed to repair room player before Playing XI finalize", formatDbError(err))
+              )
+            );
+          }
           room.playing11.set(sid, { 
             ...evalResult, 
             playerIds: lineup.map((p) => p.id), 
             username: user.username, 
             teamName: user.teamName,
+            userId: user.userId || null,
             playerNames: lineup.map(p => p.name)
           });
           if (room.dbId && user.userId) {
@@ -2131,7 +2301,10 @@ async function autoFinalizePlaying11(roomId) {
                 .catch((err) => console.error("Failed to persist playing11", formatDbError(err)))
             );
           }
-          room.playing11Drafts.delete(sid);
+          const matchingDraftKey = findMatchingRuntimeKeyInCollection(room.playing11Drafts, room, sid, identityFallback);
+          if (matchingDraftKey) {
+            room.playing11Drafts.delete(matchingDraftKey);
+          }
         } else {
           disqualified.add(sid);
         }
@@ -2981,17 +3154,22 @@ io.on("connection", (socket) => {
     const room = rooms.get(roomId);
     if (!room) return;
     touchRoomActivity(room);
+    const identityFallback = {
+      userId: socket.data.userId || null,
+      teamName: socket.data.teamName || null,
+      username: socket.data.username || null,
+    };
 
     if (room.selectDeadline && Date.now() > room.selectDeadline) {
       autoFinalizePlaying11(roomId);
       socket.emit("playing11_error", { reason: "Playing XI timer ended. Finalizing results now." });
       return;
     }
-    if (room.disqualified.has(socket.id)) {
+    if (findMatchingRuntimeKeyInCollection(room.disqualified, room, socket.id, identityFallback)) {
       socket.emit("playing11_error", { reason: "Disqualified: insufficient squad to form valid XI" });
       return;
     }
-    if (room.playing11.has(socket.id)) {
+    if (findMatchingRuntimeKeyInCollection(room.playing11, room, socket.id, identityFallback)) {
       socket.emit("playing11_error", { reason: "Playing XI already locked for this team." });
       return;
     }
@@ -3004,14 +3182,24 @@ io.on("connection", (socket) => {
     const user = room.users.get(socket.id);
     const lineup = (user?.team || []).filter(p => ids.includes(p.id));
 
+    if (room.dbId && user?.userId) {
+      await ensureRoomPlayerIdentity(room.dbId, user).catch((err) => {
+        console.error("Failed to repair room player before Playing XI submit", formatDbError(err));
+      });
+    }
+
     room.playing11.set(socket.id, { 
       ...evalResult, 
       playerIds: ids, 
-      username: socket.data.username, 
-      teamName: user?.teamName || null,
+      username: user?.username || socket.data.username, 
+      teamName: user?.teamName || socket.data.teamName || null,
+      userId: user?.userId || socket.data.userId || null,
       playerNames: lineup.map(p => p.name)
     });
-    room.playing11Drafts.delete(socket.id);
+    const existingDraftKey = findMatchingRuntimeKeyInCollection(room.playing11Drafts, room, socket.id, identityFallback);
+    if (existingDraftKey) {
+      room.playing11Drafts.delete(existingDraftKey);
+    }
 
     if (room.dbId && user?.userId) {
       persistPlaying11(room.dbId, user.userId, ids, evalResult.score)
@@ -3037,9 +3225,19 @@ io.on("connection", (socket) => {
     const roomId = socket.data.roomId;
     const room = rooms.get(roomId);
     if (!room || room.status !== "picking") return;
-    if (room.disqualified.has(socket.id) || room.playing11.has(socket.id)) return;
+    const identityFallback = {
+      userId: socket.data.userId || null,
+      teamName: socket.data.teamName || null,
+      username: socket.data.username || null,
+    };
+    if (findMatchingRuntimeKeyInCollection(room.disqualified, room, socket.id, identityFallback)) return;
+    if (findMatchingRuntimeKeyInCollection(room.playing11, room, socket.id, identityFallback)) return;
 
     const ids = normalizePlayerIdList(payload?.playerIds).slice(0, 11);
+    const existingDraftKey = findMatchingRuntimeKeyInCollection(room.playing11Drafts, room, socket.id, identityFallback);
+    if (existingDraftKey && existingDraftKey !== socket.id) {
+      room.playing11Drafts.delete(existingDraftKey);
+    }
     room.playing11Drafts.set(socket.id, ids);
     touchRoomActivity(room);
     persistAuctionState(roomId);

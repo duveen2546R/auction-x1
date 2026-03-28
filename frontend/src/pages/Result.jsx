@@ -112,6 +112,7 @@ export default function Result() {
             setWinner(payload.winner);
             setSubmitting(false);
             setLocked(true);
+            setError(null);
         };
         const onErr = (payload) => {
             setError(payload.reason);
@@ -140,6 +141,7 @@ export default function Result() {
         socket.on("playing11_ack", (payload) => {
             setSubmitting(false);
             setLocked(true);
+            setError(null);
             if (Array.isArray(payload?.playerIds)) {
                 setSelected(payload.playerIds);
             }
@@ -187,6 +189,7 @@ export default function Result() {
             if (payload.roomStatus === "finished_finalized") {
                 setSubmitting(false);
                 setLocked(true);
+                setError(null);
             } else if (payload.roomStatus === "picking") {
                 setLocked(false);
             } else if (roomId) {
@@ -196,6 +199,7 @@ export default function Result() {
             if (Array.isArray(payload.savedPlaying11) && payload.savedPlaying11.length) {
                 setSelected(payload.savedPlaying11);
                 setLocked(true);
+                setError(null);
             } else if (Array.isArray(payload.playing11Draft) && payload.playing11Draft.length) {
                 setSelected(payload.playing11Draft);
             }
