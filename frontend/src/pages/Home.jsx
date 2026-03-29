@@ -262,11 +262,10 @@ export default function Home() {
                                                             key={visibility}
                                                             type="button"
                                                             onClick={() => setRoomVisibility(visibility)}
-                                                            className={`rounded-xl border px-4 py-3 text-xs font-black uppercase tracking-[0.2em] transition-all ${
-                                                                isActive
-                                                                    ? "border-accent bg-accent/15 text-white"
-                                                                    : "border-white/5 bg-white/5 text-slate-400 hover:border-white/15 hover:text-white"
-                                                            }`}
+                                                            className={`rounded-xl border px-4 py-3 text-xs font-black uppercase tracking-[0.2em] transition-all ${isActive
+                                                                ? "border-accent bg-accent/15 text-white"
+                                                                : "border-white/5 bg-white/5 text-slate-400 hover:border-white/15 hover:text-white"
+                                                                }`}
                                                         >
                                                             {visibility}
                                                         </button>
@@ -382,7 +381,7 @@ export default function Home() {
                                     <span className="text-xs font-black uppercase tracking-widest italic text-white">The Official Rulebook</span>
                                     <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest mt-1">Master the mechanics of the auction</p>
                                 </div>
-                                <span className="text-[10px] font-black text-accent bg-accent/10 px-2 py-1 rounded border border-accent/20 uppercase tracking-widest italic">V 2.1.0</span>
+
                             </div>
 
                             <div className="grid md:grid-cols-2 gap-8">
@@ -513,7 +512,7 @@ export default function Home() {
 
                 <footer className="text-center py-8 border-t border-white/5">
                     <p className="text-[10px] text-slate-600 font-bold uppercase tracking-[0.4em]">
-                        Developed for Competitive Simulation · v2.1.0
+                        Developed by Duveen Kumar Reddy Rachapalli
                     </p>
                 </footer>
             </div>
