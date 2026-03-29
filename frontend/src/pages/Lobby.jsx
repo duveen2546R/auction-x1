@@ -1,8 +1,8 @@
-import { useEffect, useState, useMemo, useRef } from "react";
+import { useEffect, useState, useMemo, useRef, useCallback } from "react";
 import { useParams, useLocation, useNavigate } from "react-router-dom";
 import socket from "../socket";
 import VoiceChat from "../components/VoiceChat";
-import { clearSession, getAuthToken } from "../session";
+import { clearSession, getAuthToken, getStoredUsername } from "../session";
 
 const slugMap = {
     "royal challengers bangalore": "banglore",
@@ -27,8 +27,10 @@ export default function Lobby() {
     const [roomVisibility, setRoomVisibility] = useState(state?.roomVisibility || "private");
     const [creatorName, setCreatorName] = useState(null);
     const isInitialJoin = useRef(true);
+    const preserveRoomOnExitRef = useRef(false);
+    const didLeaveRoomRef = useRef(false);
 
-    const username = state?.username || localStorage.getItem("username") || "Player";
+    const username = state?.username || getStoredUsername() || "Player";
     const teamName = state?.teamName || localStorage.getItem("teamName") || "";
     const requestedVisibility = state?.roomVisibility;
     const joinIntent = state?.joinIntent || "join";
@@ -41,6 +43,32 @@ export default function Lobby() {
             return null;
         }
     }, [teamName]);
+
+    const leaveRoom = useCallback(() => {
+        if (!roomId || didLeaveRoomRef.current) return;
+        didLeaveRoomRef.current = true;
+        socket.emit("leave_room", { roomId });
+        localStorage.removeItem("activeRoomId");
+    }, [roomId]);
+
+    const moveToAuction = useCallback(() => {
+        preserveRoomOnExitRef.current = true;
+        navigate(`/auction/${roomId}`, { state: { username, teamName } });
+    }, [navigate, roomId, teamName, username]);
+
+    useEffect(() => {
+        didLeaveRoomRef.current = false;
+        preserveRoomOnExitRef.current = false;
+        if (roomId) {
+            localStorage.setItem("activeRoomId", roomId);
+        }
+
+        return () => {
+            if (!preserveRoomOnExitRef.current && !didLeaveRoomRef.current) {
+                leaveRoom();
+            }
+        };
+    }, [leaveRoom, roomId]);
 
     useEffect(() => {
         const joinRoom = () => {
@@ -65,13 +93,12 @@ export default function Lobby() {
             }
             isInitialJoin.current = false;
 
-            if (payload?.username) localStorage.setItem("username", payload.username);
             if (typeof payload?.isCreator === "boolean") setIsCreator(payload.isCreator);
             if (payload?.roomVisibility) setRoomVisibility(payload.roomVisibility);
             if (payload?.creatorName) setCreatorName(payload.creatorName);
 
             if (payload.isWithdrawn || (payload.roomStatus && payload.roomStatus !== "waiting")) {
-                navigate(`/auction/${roomId}`, { state: { username, teamName } });
+                moveToAuction();
             }
         });
 
@@ -79,9 +106,7 @@ export default function Lobby() {
             setPlayers(playerList);
         });
 
-        socket.on("start_auction", () => {
-            navigate(`/auction/${roomId}`, { state: { username, teamName } });
-        });
+        socket.on("start_auction", moveToAuction);
 
         socket.on("team_taken", (payload) => {
             setError(`Team ${payload.team} already taken. Choose another team.`);
@@ -94,11 +119,13 @@ export default function Lobby() {
         socket.on("join_error", (payload) => {
             if (payload?.code === "AUTH_INVALID") {
                 clearSession();
+                leaveRoom();
                 navigate("/auth");
                 return;
             }
 
             if (payload?.code === "AUTH_REQUIRED_CREATE" || payload?.code === "AUTH_REQUIRED_JOIN") {
+                leaveRoom();
                 navigate("/auth");
                 return;
             }
@@ -108,6 +135,7 @@ export default function Lobby() {
 
         socket.on("room_closed", (payload) => {
             alert(payload?.reason || "This room was closed.");
+            leaveRoom();
             navigate("/");
         });
 
@@ -115,13 +143,13 @@ export default function Lobby() {
             socket.off("connect", joinRoom);
             socket.off("join_ack");
             socket.off("players_update");
-            socket.off("start_auction");
+            socket.off("start_auction", moveToAuction);
             socket.off("team_taken");
             socket.off("start_auction_denied");
             socket.off("join_error");
             socket.off("room_closed");
         };
-    }, [navigate, requestedVisibility, roomId, username, teamName, joinIntent]);
+    }, [leaveRoom, moveToAuction, navigate, requestedVisibility, roomId, username, teamName, joinIntent]);
 
     const creatorLabel = creatorName || players.find((player) => player.isCreator)?.username || "Room Creator";
     const startDisabled = players.length < 2 || !isCreator;
@@ -261,7 +289,10 @@ export default function Lobby() {
                     <footer className="pt-4 flex justify-center">
                         <button 
                             className="text-[10px] font-black uppercase tracking-[0.3em] text-slate-600 hover:text-white transition-colors flex items-center gap-2"
-                            onClick={() => navigate("/")}
+                            onClick={() => {
+                                leaveRoom();
+                                navigate("/");
+                            }}
                         >
                             <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="m15 18-6-6 6-6"/></svg>
                             ABANDON SESSION

@@ -148,7 +148,7 @@ function getUniqueRuntimeParticipantKeys(room) {
   const uniqueParticipants = new Map();
   for (const [socketId, user] of room.users.entries()) {
     const identityKey =
-      getStableIdentityKeyFromParts(user?.userId, user?.teamName, user?.username) || `socket:${socketId}`;
+      getStableIdentityKeyFromParts(user?.userId, user?.username) || `socket:${socketId}`;
     uniqueParticipants.set(identityKey, socketId);
   }
   return Array.from(uniqueParticipants.values());
@@ -170,13 +170,11 @@ function normalizeIdentityValue(value) {
   return cleanValue || null;
 }
 
-function getStableIdentityKeyFromParts(userId, teamName, username) {
+function getStableIdentityKeyFromParts(userId, username) {
   const persistentUserKey = getPersistentUserKey(userId);
   if (persistentUserKey) return persistentUserKey;
 
-  const normalizedTeamName = normalizeIdentityValue(teamName);
-  if (normalizedTeamName) return `team:${normalizedTeamName}`;
-
+  // Franchise choice is room state, not account identity.
   const normalizedUsername = normalizeIdentityValue(username);
   if (normalizedUsername) return `username:${normalizedUsername}`;
 
@@ -187,7 +185,6 @@ function getRuntimeIdentityKey(room, runtimeKey, fallbackIdentity = {}) {
   const roomUser = room?.users?.get(runtimeKey) || {};
   return getStableIdentityKeyFromParts(
     roomUser.userId ?? fallbackIdentity.userId,
-    roomUser.teamName ?? fallbackIdentity.teamName,
     roomUser.username ?? fallbackIdentity.username
   );
 }
@@ -252,7 +249,7 @@ async function getEligiblePlaying11SubmissionTarget(room) {
   const runtimeParticipants = new Set();
   for (const [socketId, user] of room.users.entries()) {
     if (disqualified.has(socketId) || blockedUsers.has(socketId) || !Array.isArray(user?.team)) continue;
-    const identityKey = getStableIdentityKeyFromParts(user?.userId, user?.teamName, user?.username);
+    const identityKey = getStableIdentityKeyFromParts(user?.userId, user?.username);
     if (identityKey) {
       runtimeParticipants.add(identityKey);
     }
@@ -296,7 +293,6 @@ function getPlaying11SubmissionCount(room) {
     const user = room.users.get(socketId);
     const identityKey = getStableIdentityKeyFromParts(
       entry?.userId ?? user?.userId,
-      entry?.teamName ?? user?.teamName,
       entry?.username ?? user?.username ?? socketId
     );
     if (identityKey) {
@@ -620,7 +616,7 @@ function findRoomUser(room, userId, username) {
   return [null, null];
 }
 
-async function findPersistedRoomParticipant(roomDbId, { userId, username, teamName } = {}) {
+async function findPersistedRoomParticipant(roomDbId, { userId, username } = {}) {
   const numericRoomDbId = Number(roomDbId);
   if (!Number.isInteger(numericRoomDbId) || numericRoomDbId <= 0) {
     return null;
@@ -630,7 +626,6 @@ async function findPersistedRoomParticipant(roomDbId, { userId, username, teamNa
   const filterParams = [];
   const numericUserId = Number(userId);
   const cleanUsername = String(username || "").trim();
-  const cleanTeamName = String(teamName || "").trim();
 
   if (Number.isInteger(numericUserId) && numericUserId > 0) {
     filters.push("participant_ids.user_id = ?");
@@ -639,10 +634,6 @@ async function findPersistedRoomParticipant(roomDbId, { userId, username, teamNa
   if (cleanUsername) {
     filters.push("LOWER(u.username) = LOWER(?)");
     filterParams.push(cleanUsername);
-  }
-  if (cleanTeamName) {
-    filters.push("LOWER(COALESCE(rp.team_name, t.name)) = LOWER(?)");
-    filterParams.push(cleanTeamName);
   }
 
   if (!filters.length) {
@@ -1821,7 +1812,7 @@ async function startNextPlayer(roomId) {
   broadcastPublicRooms();
   await persistAuctionState(roomId);
 
-  // Find the next player in the queue who hasn't been sold or marked unsold
+  // Find the next player in the queue who hasn't been sold or marked unsold.
   let nextPlayer = null;
   while (room.idx < room.playersQueue.length) {
     const candidate = room.playersQueue[room.idx];
@@ -1829,11 +1820,21 @@ async function startNextPlayer(roomId) {
 
     if (room.dbId) {
       try {
-        const [sold] = await pool.query(
-          "SELECT id FROM team_players WHERE room_id = ? AND player_id = ? LIMIT 1",
-          [room.dbId, candidate.id]
+        const [resolved] = await pool.query(
+          `SELECT player_id
+           FROM (
+             SELECT player_id
+             FROM team_players
+             WHERE room_id = ? AND player_id = ?
+             UNION
+             SELECT player_id
+             FROM unsold_players
+             WHERE room_id = ? AND player_id = ?
+           ) resolved_players
+           LIMIT 1`,
+          [room.dbId, candidate.id, room.dbId, candidate.id]
         );
-        if (sold.length === 0) {
+        if (resolved.length === 0) {
           nextPlayer = candidate;
           break;
         }
@@ -2105,11 +2106,14 @@ async function finalizeBid(roomId) {
         duplicatedSaleIgnored: saleAlreadyExists && !salePersisted,
       });
     } else {
-      // Only re-queue if no user manually interacted with the player (no bids, no manual passes, no skip votes)
-      // This handles cases where the system might have skipped them incorrectly.
-      const noUserInteraction = room.passedUsers.size === 0 && room.skipPoolUsers.size === 0 && room.bidHistory.length === 0;
+      const resolveElapsedMs = Math.max(0, Date.now() - Number(room.lastBidAt || Date.now()));
+      const suddenSystemSkip =
+        room.passedUsers.size === 0 &&
+        room.skipPoolUsers.size === 0 &&
+        room.bidHistory.length === 0 &&
+        resolveElapsedMs < 2500;
 
-      if (room.dbId && !noUserInteraction) {
+      if (room.dbId && !suddenSystemSkip) {
         try {
           await pool.query(
             "INSERT INTO unsold_players (room_id, player_id) VALUES (?, ?) ON CONFLICT DO NOTHING",
@@ -2124,10 +2128,10 @@ async function finalizeBid(roomId) {
         winner: null,
       });
 
-      if (noUserInteraction) {
-        console.log(`Sudden skip detected for ${soldPlayer.name}. Re-queueing in original set: ${soldPlayer.setName}`);
-        // Insert back into the queue right after the current position to auction again soon
-        // This keeps it in the same pool/set context
+      if (suddenSystemSkip) {
+        console.warn(
+          `Detected sudden early no-bid skip for ${soldPlayer.name} in room ${roomId}; reinserting into queue`
+        );
         room.playersQueue.splice(room.idx, 0, { ...soldPlayer });
       }
     }
@@ -2694,17 +2698,6 @@ io.on("connection", (socket) => {
 
       [runtimeSocketId, runtimeUser] = findRoomUser(liveRoom, rememberedUserId, cleanName);
 
-      if (!runtimeUser && cleanTeam) {
-        const matchedRuntimeEntry = Array.from(liveRoom.users.entries()).find(
-          ([, roomUser]) =>
-            roomUser?.teamName &&
-            String(roomUser.teamName).toLowerCase() === String(cleanTeam).toLowerCase()
-        );
-        if (matchedRuntimeEntry) {
-          [runtimeSocketId, runtimeUser] = matchedRuntimeEntry;
-        }
-      }
-
       if (runtimeSocketId && runtimeUser) {
         if (liveRoom.disconnectTimeouts.has(runtimeSocketId)) {
           clearTimeout(liveRoom.disconnectTimeouts.get(runtimeSocketId));
@@ -2749,6 +2742,9 @@ io.on("connection", (socket) => {
     let existingUser = null;
     let latestStoredState = null;
     let matchedPersistedParticipant = null;
+    let hasPersistedPresence = false;
+    let isKnownPersistedParticipant = false;
+    let isKnownRoomHost = false;
     try {
       if (authenticatedSession?.userId) {
         const [users] = await pool.query(
@@ -2816,10 +2812,12 @@ io.on("connection", (socket) => {
 
       roomDbId = Number(latestSession?.id || 0) || null;
       roomCreatorUserId = Number(latestSession?.hostId || userId) || null;
+      isKnownRoomHost = Boolean(roomCreatorUserId && userId && roomCreatorUserId === userId);
       roomCreatedAt = latestSession?.createdAt
         ? new Date(latestSession.createdAt).getTime()
         : Date.now();
       roomSessionNumber = Number(latestSession?.sessionNumber || 1);
+      const dbSessionAlreadyStarted = latestSession?.status === "ongoing";
 
       room = getRoomForSession(roomId, roomDbId, {
         sessionNumber: roomSessionNumber,
@@ -2842,31 +2840,19 @@ io.on("connection", (socket) => {
       );
       [existingSocketId, existingUser] = findRoomUser(room, userId, cleanName);
 
-      if (!existingUser && cleanTeam) {
-        const matchedRuntimeEntry = Array.from(room.users.entries()).find(
-          ([, roomUser]) => roomUser?.teamName && roomUser.teamName === cleanTeam
-        );
-        if (matchedRuntimeEntry) {
-          [existingSocketId, existingUser] = matchedRuntimeEntry;
-          userId = existingUser?.userId || userId;
-          cleanName = existingUser?.username || cleanName;
-          cleanTeam = existingUser?.teamName || cleanTeam;
-          socket.data.username = cleanName;
-          socket.data.userId = userId;
-          socket.data.teamName = cleanTeam;
-        }
-      }
-
       if (!existingUser && roomDbId) {
         matchedPersistedParticipant = await findPersistedRoomParticipant(roomDbId, {
           userId,
           username: cleanName,
-          teamName: cleanTeam,
         });
         if (matchedPersistedParticipant) {
           userId = matchedPersistedParticipant.userId || userId;
           cleanName = matchedPersistedParticipant.username || cleanName;
-          cleanTeam = matchedPersistedParticipant.teamName || cleanTeam;
+          const allowFranchiseSelectionChange =
+            Boolean(cleanTeam) && room.status === "waiting" && !dbSessionAlreadyStarted;
+          if (!allowFranchiseSelectionChange) {
+            cleanTeam = matchedPersistedParticipant.teamName || cleanTeam;
+          }
           socket.data.username = cleanName;
           socket.data.userId = userId;
           socket.data.teamName = cleanTeam;
@@ -2875,12 +2861,13 @@ io.on("connection", (socket) => {
       }
 
       // Check if auction is ongoing and user is not already registered
-      const dbSessionAlreadyStarted = latestSession?.status === "ongoing";
       if (room.status !== "waiting" || dbSessionAlreadyStarted) {
-        const hasPersistedPresence = await hasPersistedRoomPresence(roomDbId, userId);
+        hasPersistedPresence = await hasPersistedRoomPresence(roomDbId, userId);
         const isKnownLiveParticipant = Boolean(existingUser);
-        const isKnownPersistedParticipant = Boolean(matchedPersistedParticipant) || hasPersistedPresence;
-        if (!hasPersistedPresence && !isKnownLiveParticipant && !isKnownPersistedParticipant) {
+        isKnownPersistedParticipant = Boolean(matchedPersistedParticipant) || hasPersistedPresence;
+        const canResumeActiveAuction =
+          isKnownLiveParticipant || isKnownPersistedParticipant || isKnownRoomHost;
+        if (!canResumeActiveAuction) {
           socket.emit("join_error", { reason: "Auction has already started. New participants cannot join." });
           return;
         }
@@ -2977,9 +2964,14 @@ io.on("connection", (socket) => {
 
     // A user is NOT a spectator if:
     // 1. They were already in the room (existingUser)
-    // 2. They have a team already (persistedTeam)
-    // 3. The auction hasn't started yet
-    const isReturningUser = !!existingUser || persistedTeam.length > 0;
+    // 2. They have persisted room membership, even with zero purchases
+    // 3. They are the room host for this session
+    const isReturningUser =
+      !!existingUser ||
+      persistedTeam.length > 0 ||
+      hasPersistedPresence ||
+      isKnownPersistedParticipant ||
+      isKnownRoomHost;
     const isSpectator = !isReturningUser && room.status !== "waiting";
 
     if (isSpectator) {
@@ -3076,6 +3068,20 @@ io.on("connection", (socket) => {
     if (participantCount < 2) {
       socket.emit("start_auction_denied", { reason: "At least 2 franchise owners are required to start the auction." });
       return;
+    }
+
+    if (room.dbId) {
+      const identityRepairs = Array.from(room.users.values())
+        .filter((user) => Number.isInteger(Number(user?.userId || 0)) && Number(user.userId) > 0)
+        .map((user) =>
+          ensureRoomPlayerIdentity(room.dbId, user).catch((err) => {
+            console.error("Failed to persist room player before auction start", formatDbError(err));
+          })
+        );
+
+      if (identityRepairs.length) {
+        await Promise.allSettled(identityRepairs);
+      }
     }
 
     // Reset room state for a fresh auction

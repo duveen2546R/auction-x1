@@ -8,32 +8,32 @@ import PlayerStatusList from "../components/PlayerStatusList";
 import TeamPurses from "../components/TeamPurses";
 import Timer from "../components/Timer";
 import VoiceChat from "../components/VoiceChat";
-import { clearSession, getAuthToken, getStoredUserId } from "../session";
+import { clearSession, getAuthToken, getStoredUserId, getStoredUsername } from "../session";
+
+const slugMap = {
+    "royal challengers bangalore": "banglore",
+    "chennai super kings": "chennai",
+    "delhi capitals": "delhi",
+    "gujarat titans": "gujarat",
+    "sunrisers hyderabad": "hyderabad",
+    "kolkata knight riders": "kolkata",
+    "lucknow super giants": "lucknow",
+    "mumbai indians": "mumbai",
+    "punjab kings": "punjab",
+    "rajasthan royals": "rajasthan",
+};
 
 export default function Auction() {
     const { state } = useLocation();
     const { roomId } = useParams();
     const navigate = useNavigate();
-    const username = state?.username || localStorage.getItem("username") || "You";
+    const username = state?.username || getStoredUsername() || "You";
     const teamName = state?.teamName || localStorage.getItem("teamName") || "";
     
     // Safety check for userId initialization
     const initialUserId = getStoredUserId();
     const [userId, setUserId] = useState(initialUserId);
 
-    const slugMap = {
-        "royal challengers bangalore": "banglore",
-        "chennai super kings": "chennai",
-        "delhi capitals": "delhi",
-        "gujarat titans": "gujarat",
-        "sunrisers hyderabad": "hyderabad",
-        "kolkata knight riders": "kolkata",
-        "lucknow super giants": "lucknow",
-        "mumbai indians": "mumbai",
-        "punjab kings": "punjab",
-        "rajasthan royals": "rajasthan",
-    };
-    
     const bgSlug = useMemo(() => {
         try {
             return teamName ? slugMap[teamName.toLowerCase()] || null : null;
@@ -79,15 +79,39 @@ export default function Auction() {
     const soldOverlayRef = useRef(null);
     const unsoldOverlayRef = useRef(null);
     const hasJoinAckRef = useRef(false);
+    const preserveRoomOnExitRef = useRef(false);
+    const didLeaveRoomRef = useRef(false);
 
     const apiBase = useMemo(() => import.meta.env.VITE_API_URL || "http://localhost:5000", []);
 
     useEffect(() => {
-        if (username) localStorage.setItem("username", username);
         if (teamName) localStorage.setItem("teamName", teamName);
         if (userId) localStorage.setItem("userId", String(userId));
         if (roomId) localStorage.setItem("activeRoomId", roomId);
     }, [username, teamName, userId, roomId]);
+
+    const leaveRoom = useCallback(() => {
+        if (!roomId || didLeaveRoomRef.current) return;
+        didLeaveRoomRef.current = true;
+        socket.emit("leave_room", { roomId });
+        localStorage.removeItem("activeRoomId");
+    }, [roomId]);
+
+    const moveToResult = useCallback((resultState = {}) => {
+        preserveRoomOnExitRef.current = true;
+        navigate("/result", { state: resultState });
+    }, [navigate]);
+
+    useEffect(() => {
+        didLeaveRoomRef.current = false;
+        preserveRoomOnExitRef.current = false;
+
+        return () => {
+            if (!preserveRoomOnExitRef.current && !didLeaveRoomRef.current) {
+                leaveRoom();
+            }
+        };
+    }, [leaveRoom]);
 
     useEffect(() => {
         currentSetRef.current = currentSet;
@@ -250,13 +274,11 @@ export default function Auction() {
         socket.on("auction_complete", (payload) => {
             markAuctionEvent();
             setTeam(currentTeam => {
-                navigate("/result", {
-                    state: {
-                        roomId,
-                        team: currentTeam,
-                        disqualified: Array.isArray(payload?.disqualified) ? payload.disqualified.includes(username) : false,
-                        deadline: payload?.deadline || null,
-                    },
+                moveToResult({
+                    roomId,
+                    team: currentTeam,
+                    disqualified: Array.isArray(payload?.disqualified) ? payload.disqualified.includes(username) : false,
+                    deadline: payload?.deadline || null,
                 });
                 return currentTeam;
             });
@@ -382,7 +404,6 @@ export default function Auction() {
             }
             isInitialJoin.current = false;
 
-            if (payload.username) localStorage.setItem("username", payload.username);
             if (payload.userId) setUserId(payload.userId);
             if (Array.isArray(payload.team)) setTeam(payload.team);
             if (typeof payload.budget === "number") setBudget(Number(payload.budget));
@@ -400,16 +421,14 @@ export default function Auction() {
             }
 
             if (payload.roomStatus === "picking" || payload.roomStatus === "finished_finalized") {
-                navigate("/result", {
-                    state: {
-                        roomId,
-                        team: payload.team || [],
-                        disqualified: Array.isArray(payload?.disqualified) ? payload.disqualified.includes(username) : false,
-                        deadline: payload?.deadline || null,
-                        selectionStartTime: payload?.selectionStartTime || null,
-                        results: payload?.results || null,
-                        winner: payload?.winner || null,
-                    },
+                moveToResult({
+                    roomId,
+                    team: payload.team || [],
+                    disqualified: Array.isArray(payload?.disqualified) ? payload.disqualified.includes(username) : false,
+                    deadline: payload?.deadline || null,
+                    selectionStartTime: payload?.selectionStartTime || null,
+                    results: payload?.results || null,
+                    winner: payload?.winner || null,
                 });
                 return;
             }
@@ -457,7 +476,7 @@ export default function Auction() {
             socket.off("join_ack");
             clearInterval(poll);
         };
-    }, [navigate, roomId, username, teamName, refreshPlayerStatus, refreshPurses, userId]);
+    }, [moveToResult, navigate, roomId, username, teamName, refreshPlayerStatus, refreshPurses, userId]);
 
     useEffect(() => {
         if (!roomId || !currentPlayer) return;

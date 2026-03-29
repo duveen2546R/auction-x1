@@ -600,6 +600,8 @@ router.get("/user/history", requireAuth, async (req, res) => {
   try {
     const [rooms] = await pool.query(
       `WITH participant_rooms AS (
+         SELECT id AS room_id FROM rooms WHERE host_id = ?
+         UNION
          SELECT room_id FROM room_players WHERE user_id = ?
          UNION
          SELECT room_id FROM team_players WHERE user_id = ?
@@ -618,7 +620,14 @@ router.get("/user/history", requireAuth, async (req, res) => {
        LEFT JOIN teams t ON t.id = rp.team_id
        ORDER BY r.created_at DESC, r.id DESC
        LIMIT 10`,
-      [req.auth.userId, req.auth.userId, req.auth.userId, req.auth.userId, req.auth.userId]
+      [
+        req.auth.userId,
+        req.auth.userId,
+        req.auth.userId,
+        req.auth.userId,
+        req.auth.userId,
+        req.auth.userId,
+      ]
     );
 
     if (!rooms.length) {

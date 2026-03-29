@@ -1,7 +1,20 @@
 import { useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import socket from "../socket";
-import { clearSession, getAuthToken } from "../session";
+import { clearSession, getAuthToken, getStoredUsername } from "../session";
+
+const slugMap = {
+    "royal challengers bangalore": "banglore",
+    "chennai super kings": "chennai",
+    "delhi capitals": "delhi",
+    "gujarat titans": "gujarat",
+    "sunrisers hyderabad": "hyderabad",
+    "kolkata knight riders": "kolkata",
+    "lucknow super giants": "lucknow",
+    "mumbai indians": "mumbai",
+    "punjab kings": "punjab",
+    "rajasthan royals": "rajasthan",
+};
 
 function validateLineup(team, ids) {
     const lineup = team.filter((p) => ids.includes(p.id));
@@ -56,22 +69,10 @@ export default function Result() {
     const [results, setResults] = useState(Array.isArray(state?.results) ? state.results : null);
     const [winner, setWinner] = useState(state?.winner || null);
     const [remaining, setRemaining] = useState(null);
-    const username = localStorage.getItem("username") || "You";
+    const username = getStoredUsername() || "You";
 
     const teamName = localStorage.getItem("teamName") || "";
-    const slugMap = {
-        "royal challengers bangalore": "banglore",
-        "chennai super kings": "chennai",
-        "delhi capitals": "delhi",
-        "gujarat titans": "gujarat",
-        "sunrisers hyderabad": "hyderabad",
-        "kolkata knight riders": "kolkata",
-        "lucknow super giants": "lucknow",
-        "mumbai indians": "mumbai",
-        "punjab kings": "punjab",
-        "rajasthan royals": "rajasthan",
-    };
-    
+
     const bgSlug = useMemo(() => {
         try {
             return teamName ? slugMap[teamName.toLowerCase()] || null : null;
