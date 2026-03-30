@@ -342,6 +342,14 @@ export default function Result() {
                                 {team.map((p) => {
                                     const checked = selected.includes(p.id);
                                     const overseas = (p.country || "").toLowerCase() !== "india";
+                                    const selectionLabel =
+                                        locked || deadlineExpired
+                                            ? checked
+                                                ? "Locked"
+                                                : "Not Picked"
+                                            : checked
+                                                ? "Selected"
+                                                : "Tap to Pick";
                                     return (
                                         <div 
                                             key={p.id} 
@@ -368,15 +376,10 @@ export default function Result() {
                                                     <span className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">{p.role}</span>
                                                 </div>
                                             </div>
-                                            <div className="flex items-center gap-6">
-                                                <div className="flex flex-col items-end">
-                                                    <span className="text-[8px] text-slate-500 font-black uppercase tracking-widest">BAT</span>
-                                                    <span className="text-sm font-black text-white italic">⭐ {p.batting_rating ?? p.rating}</span>
-                                                </div>
-                                                <div className="flex flex-col items-end">
-                                                    <span className="text-[8px] text-slate-500 font-black uppercase tracking-widest">BOWL</span>
-                                                    <span className="text-sm font-black text-white italic">⭐ {p.bowling_rating ?? p.rating}</span>
-                                                </div>
+                                            <div className="flex items-center">
+                                                <span className="text-[9px] text-slate-500 font-black uppercase tracking-[0.2em]">
+                                                    {selectionLabel}
+                                                </span>
                                             </div>
                                         </div>
                                     );

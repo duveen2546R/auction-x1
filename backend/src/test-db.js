@@ -9,7 +9,7 @@ async function main() {
 
   try {
     await verifyDatabaseConnection();
-    console.log(`Supabase Postgres connected at ${db.host}:${db.port}/${db.database}`);
+    console.log(`Supabase Postgres connected`);
     process.exitCode = 0;
   } catch (error) {
     console.error(
@@ -17,7 +17,7 @@ async function main() {
     );
     process.exitCode = 1;
   } finally {
-    await pool.end().catch(() => {});
+    await pool.end().catch(() => { });
   }
 }
 
