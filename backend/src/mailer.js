@@ -1,4 +1,18 @@
-let transporterPromise = null;
+import dns from "node:dns/promises";
+
+let mailerModulePromise = null;
+
+function parseSmtpFamily() {
+  const rawValue = String(process.env.SMTP_FAMILY || "4").trim();
+  if (!rawValue) return 4;
+  if (rawValue === "0") return 0;
+  if (rawValue === "4" || rawValue === "6") {
+    return Number(rawValue);
+  }
+
+  console.warn(`Invalid SMTP_FAMILY "${rawValue}". Falling back to IPv4.`);
+  return 4;
+}
 
 function getSmtpConfig() {
   const host = String(process.env.SMTP_HOST || "").trim();
@@ -14,35 +28,58 @@ function getSmtpConfig() {
     port,
     secure,
     auth: user && pass ? { user, pass } : null,
+    family: parseSmtpFamily(),
     from,
     configured: Boolean(host && from && user && pass),
   };
 }
 
-async function getTransporter() {
-  if (transporterPromise) {
-    return transporterPromise;
+async function getNodemailer() {
+  if (!mailerModulePromise) {
+    mailerModulePromise = import("nodemailer")
+      .then((nodemailerModule) => nodemailerModule.default || nodemailerModule)
+      .catch((error) => {
+        mailerModulePromise = null;
+        throw error;
+      });
   }
 
-  transporterPromise = (async () => {
-    const config = getSmtpConfig();
-    if (!config.configured) {
-      return null;
-    }
+  return mailerModulePromise;
+}
 
-    const nodemailerModule = await import("nodemailer");
-    const nodemailer = nodemailerModule.default || nodemailerModule;
-
-    return nodemailer.createTransport({
+async function resolveSmtpHost(config) {
+  if (!config.family || !config.host) {
+    return {
       host: config.host,
-      port: config.port,
-      secure: config.secure,
-      auth: config.auth,
-      family: 4,
-    });
-  })();
+      tls: undefined,
+    };
+  }
 
-  return transporterPromise;
+  // Render commonly lacks IPv6 egress, so we default SMTP lookups to IPv4.
+  const { address } = await dns.lookup(config.host, { family: config.family });
+
+  return {
+    host: address,
+    tls: address !== config.host ? { servername: config.host } : undefined,
+  };
+}
+
+async function getTransporter() {
+  const config = getSmtpConfig();
+  if (!config.configured) {
+    return null;
+  }
+
+  const nodemailer = await getNodemailer();
+  const resolvedHost = await resolveSmtpHost(config);
+
+  return nodemailer.createTransport({
+    host: resolvedHost.host,
+    port: config.port,
+    secure: config.secure,
+    auth: config.auth,
+    tls: resolvedHost.tls,
+  });
 }
 
 export function getPasswordResetBaseUrl() {
@@ -226,27 +263,27 @@ export async function sendAuctionCompletionEmail({
 
   const squadHtml = yourSquad.length
     ? yourSquad
-      .map(
-        (player) => `
+        .map(
+          (player) => `
             <div style="border:1px solid rgba(255,255,255,0.06);border-radius:14px;padding:12px 14px;background:rgba(255,255,255,0.03);">
               <div style="font-size:13px;font-weight:900;color:#f8fafc;text-transform:uppercase;font-style:italic;">${escapeHtml(player.name)}</div>
               <div style="margin-top:8px;font-size:10px;letter-spacing:0.18em;text-transform:uppercase;font-weight:800;color:#94a3b8;">${escapeHtml(player.role || "Player")} · ${escapeHtml(player.country || "Unknown")} · ${escapeHtml(formatCr(player.price || 0))}</div>
             </div>
           `
-      )
-      .join("")
+        )
+        .join("")
     : `<div style="font-size:13px;color:#94a3b8;">No squad data was saved for this session.</div>`;
 
   const playing11Html = yourPlaying11.length
     ? yourPlaying11
-      .map(
-        (playerName, index) => `
+        .map(
+          (playerName, index) => `
             <div style="padding:10px 12px;border-radius:12px;border:1px solid rgba(103,232,249,0.16);background:rgba(103,232,249,0.08);font-size:12px;font-weight:900;color:#e0f2fe;text-transform:uppercase;letter-spacing:0.12em;">
               ${index + 1}. ${escapeHtml(playerName)}
             </div>
           `
-      )
-      .join("")
+        )
+        .join("")
     : `<div style="font-size:13px;color:#94a3b8;">${disqualified ? "No valid Playing XI was submitted for this team." : "No Playing XI was saved for this team."}</div>`;
 
   const html = renderShell({

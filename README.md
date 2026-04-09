@@ -253,6 +253,13 @@ PORT=5001
 FRONTEND_ORIGIN=http://localhost:5173
 DATABASE_URL=postgresql://postgres:YOUR_PASSWORD@YOUR_SUPABASE_HOST:6543/postgres
 JWT_SECRET=replace-this-with-a-long-random-secret
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_SECURE=false
+SMTP_USER=your-email@example.com
+SMTP_PASS=your-app-password
+MAIL_FROM=AuctionXI <your-email@example.com>
+SMTP_FAMILY=4
 ```
 
 Required values:
@@ -261,6 +268,16 @@ Required values:
 - `FRONTEND_ORIGIN`: allowed frontend origin for CORS
 - `DATABASE_URL`: Supabase/PostgreSQL connection string
 - `JWT_SECRET`: secret used to sign auth tokens
+
+Optional mail values:
+
+- `SMTP_HOST`: SMTP server hostname
+- `SMTP_PORT`: SMTP server port, usually `587` or `465`
+- `SMTP_SECURE`: set to `true` for implicit TLS, usually with port `465`
+- `SMTP_USER`: SMTP account username
+- `SMTP_PASS`: SMTP account password or app password
+- `MAIL_FROM`: sender shown in outgoing emails
+- `SMTP_FAMILY`: IP family used for SMTP DNS resolution. Keep this at `4` on Render to avoid IPv6 `ENETUNREACH` errors, or set `0` to use the platform default
 
 ### Frontend `.env`
 
