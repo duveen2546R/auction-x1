@@ -38,6 +38,7 @@ async function getTransporter() {
       port: config.port,
       secure: config.secure,
       auth: config.auth,
+      family: 4,
     });
   })();
 
@@ -225,27 +226,27 @@ export async function sendAuctionCompletionEmail({
 
   const squadHtml = yourSquad.length
     ? yourSquad
-        .map(
-          (player) => `
+      .map(
+        (player) => `
             <div style="border:1px solid rgba(255,255,255,0.06);border-radius:14px;padding:12px 14px;background:rgba(255,255,255,0.03);">
               <div style="font-size:13px;font-weight:900;color:#f8fafc;text-transform:uppercase;font-style:italic;">${escapeHtml(player.name)}</div>
               <div style="margin-top:8px;font-size:10px;letter-spacing:0.18em;text-transform:uppercase;font-weight:800;color:#94a3b8;">${escapeHtml(player.role || "Player")} · ${escapeHtml(player.country || "Unknown")} · ${escapeHtml(formatCr(player.price || 0))}</div>
             </div>
           `
-        )
-        .join("")
+      )
+      .join("")
     : `<div style="font-size:13px;color:#94a3b8;">No squad data was saved for this session.</div>`;
 
   const playing11Html = yourPlaying11.length
     ? yourPlaying11
-        .map(
-          (playerName, index) => `
+      .map(
+        (playerName, index) => `
             <div style="padding:10px 12px;border-radius:12px;border:1px solid rgba(103,232,249,0.16);background:rgba(103,232,249,0.08);font-size:12px;font-weight:900;color:#e0f2fe;text-transform:uppercase;letter-spacing:0.12em;">
               ${index + 1}. ${escapeHtml(playerName)}
             </div>
           `
-        )
-        .join("")
+      )
+      .join("")
     : `<div style="font-size:13px;color:#94a3b8;">${disqualified ? "No valid Playing XI was submitted for this team." : "No Playing XI was saved for this team."}</div>`;
 
   const html = renderShell({
