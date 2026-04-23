@@ -552,6 +552,28 @@ export default function Auction() {
         setChatInput("");
     };
 
+    useEffect(() => {
+        const handleKeyDown = (e) => {
+            // Don't trigger shortcuts if user is typing in an input or textarea
+            if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
+
+            const key = e.key.toUpperCase();
+            if (key === "B") {
+                const suggested = !!lastBidder ? (Number(currentBid) + Number(step)) : Number(currentBid);
+                placeBid(suggested);
+            } else if (key === "P") {
+                passPlayer();
+            } else if (key === "S") {
+                skipPool();
+            } else if (key === "W") {
+                withdraw();
+            }
+        };
+
+        window.addEventListener("keydown", handleKeyDown);
+        return () => window.removeEventListener("keydown", handleKeyDown);
+    }, [currentBid, step, lastBidder, budget, eliminated, isSpectator, hasVotedSkip, hasPassed, placeBid, passPlayer, skipPool, withdraw]);
+
     const currentIdx = Number(queueInfo.currentIndex ?? 0);
     const totalCount = Number(queueInfo.total ?? 0);
     const bidLeaderLength = String(lastBidder || "").trim().length;

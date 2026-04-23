@@ -421,8 +421,9 @@ export default function Home() {
                                         </h4>
                                         <ul className="space-y-2 text-xs text-slate-300 font-medium leading-relaxed bg-white/5 p-4 rounded-xl border border-white/5">
                                             <li className="flex items-start gap-2"><span className="text-accent">•</span> <strong>Timer:</strong> Player is sold if no new bids are placed after the "Going Twice" warning (~13 seconds).</li>
-                                            <li className="flex items-start gap-2"><span className="text-accent">•</span> <strong>Pass:</strong> Opt out of the current player. If all active owners pass, the player goes UNSOLD.</li>
-                                            <li className="flex items-start gap-2"><span className="text-accent">•</span> <strong>Withdraw:</strong> Exit the entire auction bidding session permanently. You will keep your current squad and wait to participate in the final Playing XI selection.</li>
+                                            <li className="flex items-start gap-2"><span className="text-accent">•</span> <strong>Pass:</strong> Opt out of the current player. Requires a <strong>Double Click</strong> or press <strong>'P'</strong> on your keyboard.</li>
+                                            <li className="flex items-start gap-2"><span className="text-accent">•</span> <strong>Withdraw:</strong> Exit the auction session permanently. Press <strong>'W'</strong> on your keyboard.</li>
+                                            <li className="flex items-start gap-2"><span className="text-accent">•</span> <strong>Shortcuts:</strong> <strong>'B'</strong> to Bid, <strong>'P'</strong> to Pass, <strong>'S'</strong> to Skip Pool, <strong>'W'</strong> to Withdraw.</li>
                                         </ul>
                                     </div>
 
