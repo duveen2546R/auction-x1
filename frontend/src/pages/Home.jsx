@@ -154,43 +154,43 @@ export default function Home() {
     );
 
     return (
-        <div className="min-h-screen text-slate-100 px-4 py-8 bg-[#020408]"
+        <div className="min-h-screen text-slate-100 px-4 py-6 md:py-8 bg-[#020408]"
             style={{
                 backgroundImage: "radial-gradient(circle at 50% 0%, rgba(56, 189, 248, 0.05) 0%, transparent 50%)",
                 backgroundAttachment: "fixed"
             }}>
-            <div className="max-w-7xl mx-auto space-y-12">
+            <div className="max-w-7xl mx-auto space-y-8 md:space-y-12">
                 {/* Hero Section */}
-                <header className="flex flex-col items-center text-center space-y-6 py-12">
+                <header className="flex flex-col items-center text-center space-y-4 md:space-y-6 py-8 md:py-12">
                     <div className="inline-flex items-center gap-3 px-4 py-1.5 rounded-full bg-accent/10 border border-accent/20 animate-fade-in">
                         <span className="w-2 h-2 rounded-full bg-accent animate-pulse"></span>
                         <span className="text-[10px] font-black uppercase tracking-[0.3em] text-accent">Season 2026 Live</span>
                     </div>
                     <div className="space-y-2">
-                        <h1 className="text-6xl md:text-8xl font-black italic tracking-tighter uppercase text-white animate-slide-up">
+                        <h1 className="text-4xl sm:text-6xl md:text-8xl font-black italic tracking-tighter uppercase text-white animate-slide-up">
                             AUCTIONXI <span className="text-transparent stroke-text">ARENA</span>
                         </h1>
-                        <p className="text-slate-500 font-bold uppercase tracking-[0.4em] text-xs md:text-sm animate-slide-up delay-100">
+                        <p className="text-slate-500 font-bold uppercase tracking-[0.2em] sm:tracking-[0.4em] text-[10px] sm:text-xs md:text-sm animate-slide-up delay-100 px-4">
                             The Ultimate IPL Franchise Simulator
                         </p>
                     </div>
-                    <div className="flex flex-wrap items-center justify-center gap-3">
+                    <div className="flex flex-wrap items-center justify-center gap-2 md:gap-3 px-2">
                         {isAuthenticated ? (
                             <>
-                                <span className="rounded-full border border-emerald-500/20 bg-emerald-500/10 px-4 py-2 text-[10px] font-black uppercase tracking-[0.2em] text-emerald-300">
+                                <span className="rounded-full border border-emerald-500/20 bg-emerald-500/10 px-3 md:px-4 py-2 text-[9px] md:text-[10px] font-black uppercase tracking-[0.1em] md:tracking-[0.2em] text-emerald-300">
                                     Signed In As {activeUsername}
                                 </span>
                                 <button
                                     type="button"
                                     onClick={() => navigate("/history")}
-                                    className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-[10px] font-black uppercase tracking-[0.2em] text-white transition hover:border-accent/30 hover:text-accent"
+                                    className="rounded-full border border-white/10 bg-white/5 px-3 md:px-4 py-2 text-[9px] md:text-[10px] font-black uppercase tracking-[0.1em] md:tracking-[0.2em] text-white transition hover:border-accent/30 hover:text-accent"
                                 >
                                     Recent Rooms
                                 </button>
                                 <button
                                     type="button"
                                     onClick={handleLogout}
-                                    className="rounded-full border border-white/10 bg-transparent px-4 py-2 text-[10px] font-black uppercase tracking-[0.2em] text-slate-400 transition hover:border-rose-500/30 hover:text-rose-400"
+                                    className="rounded-full border border-white/10 bg-transparent px-3 md:px-4 py-2 text-[9px] md:text-[10px] font-black uppercase tracking-[0.1em] md:tracking-[0.2em] text-slate-400 transition hover:border-rose-500/30 hover:text-rose-400"
                                 >
                                     Logout
                                 </button>
@@ -199,7 +199,7 @@ export default function Home() {
                             <button
                                 type="button"
                                 onClick={() => navigate("/auth")}
-                                className="rounded-full border border-accent/30 bg-accent/10 px-4 py-2 text-[10px] font-black uppercase tracking-[0.2em] text-accent transition hover:bg-accent/20"
+                                className="rounded-full border border-accent/30 bg-accent/10 px-6 py-3 text-[10px] font-black uppercase tracking-[0.2em] text-accent transition hover:bg-accent/20"
                             >
                                 Login / Register
                             </button>
@@ -207,15 +207,15 @@ export default function Home() {
                     </div>
                 </header>
 
-                <div className="grid lg:grid-cols-[1fr_400px] gap-8">
-                    <main className="space-y-8 animate-slide-up delay-200">
+                <div className="grid lg:grid-cols-[1fr_400px] gap-6 md:gap-8">
+                    <main className="space-y-6 md:space-y-8 animate-slide-up delay-200">
                         {/* Configuration Card */}
-                        <section className="glass-card p-8 space-y-8 relative overflow-hidden">
-                            <div className="absolute top-0 right-0 p-8 text-[100px] font-black italic text-white/5 select-none pointer-events-none uppercase tracking-tighter">
+                        <section className="glass-card p-6 md:p-8 space-y-8 relative overflow-hidden">
+                            <div className="absolute top-0 right-0 p-8 text-6xl sm:text-8xl md:text-[100px] font-black italic text-white/5 select-none pointer-events-none uppercase tracking-tighter">
                                 JOIN
                             </div>
 
-                            <div className="relative z-10 grid md:grid-cols-2 gap-8">
+                            <div className="relative z-10 grid md:grid-cols-2 gap-6 md:gap-8">
                                 <div className="space-y-6">
                                     <div className="space-y-4">
                                         <div className="flex flex-col">
@@ -288,11 +288,11 @@ export default function Home() {
                                     )}
                                 </div>
 
-                                <div className="p-6 bg-white/5 rounded-2xl border border-white/5 border-dashed space-y-6">
+                                <div className="p-4 md:p-6 bg-white/5 rounded-2xl border border-white/5 border-dashed space-y-6">
                                     <div className="space-y-4">
                                         <label className="text-[10px] text-slate-400 font-black uppercase tracking-[0.2em]">Join Existing Arena</label>
                                         <input
-                                            className="w-full rounded-xl border border-white/5 bg-white/5 px-4 py-3 text-sm text-white placeholder-slate-700 focus:outline-none focus:ring-2 focus:ring-accent transition-all text-center tracking-[0.5em] font-black"
+                                            className="w-full rounded-xl border border-white/5 bg-white/5 px-4 py-3 text-sm text-white placeholder-slate-700 focus:outline-none focus:ring-2 focus:ring-accent transition-all text-center tracking-[0.3em] sm:tracking-[0.5em] font-black"
                                             placeholder="XXXXXX"
                                             value={roomCode}
                                             onChange={(e) => {
@@ -316,13 +316,13 @@ export default function Home() {
 
                                     <div className="border-t border-white/5 pt-6 space-y-4">
                                         <div className="flex items-center justify-between gap-3">
-                                            <div>
+                                            <div className="flex-1">
                                                 <h3 className="text-[10px] font-black uppercase tracking-[0.2em] text-white italic">Live Public Lobbies</h3>
-                                                <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest mt-1">
+                                                <p className="text-[9px] sm:text-[10px] text-slate-500 font-bold uppercase tracking-widest mt-1">
                                                     Visible only while hosts are waiting in the lobby
                                                 </p>
                                             </div>
-                                            <span className="rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2.5 py-1 text-[10px] font-black uppercase tracking-widest text-emerald-300">
+                                            <span className="shrink-0 rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2.5 py-1 text-[10px] font-black uppercase tracking-widest text-emerald-300">
                                                 {publicRooms.length} Live
                                             </span>
                                         </div>
@@ -375,7 +375,7 @@ export default function Home() {
                         </section>
 
                         {/* Comprehensive Rulebook */}
-                        <section className="glass-card p-8 space-y-8">
+                        <section className="glass-card p-6 md:p-8 space-y-8">
                             <div className="flex items-center justify-between border-b border-white/5 pb-4">
                                 <div>
                                     <span className="text-xs font-black uppercase tracking-widest italic text-white">The Official Rulebook</span>
@@ -384,7 +384,7 @@ export default function Home() {
 
                             </div>
 
-                            <div className="grid md:grid-cols-2 gap-8">
+                            <div className="grid md:grid-cols-2 gap-6 md:gap-8">
                                 <div className="space-y-6">
                                     <div className="space-y-2">
                                         <h4 className="text-[10px] font-black text-accent uppercase tracking-widest flex items-center gap-2">
@@ -449,7 +449,7 @@ export default function Home() {
                                 <span className="text-xs font-black uppercase tracking-widest italic text-white">Market Player Pool Preview</span>
                                 <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">{players.length} Total Drafts</span>
                             </div>
-                            <div className="grid md:grid-cols-2 gap-4">
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                                 {renderList("Batsmen", grouped.batsman)}
                                 {renderList("All-rounders", grouped.allrounder)}
                                 {renderList("Bowlers", grouped.bowler)}
