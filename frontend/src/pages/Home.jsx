@@ -154,7 +154,7 @@ export default function Home() {
     );
 
     return (
-        <div className="min-h-screen text-slate-100 px-4 py-6 md:py-8 bg-[#020408]"
+        <div className="min-h-screen text-slate-100 px-4 py-6 md:py-8 bg-[#020408] overflow-x-hidden"
             style={{
                 backgroundImage: "radial-gradient(circle at 50% 0%, rgba(56, 189, 248, 0.05) 0%, transparent 50%)",
                 backgroundAttachment: "fixed"
@@ -196,13 +196,22 @@ export default function Home() {
                                 </button>
                             </>
                         ) : (
-                            <button
-                                type="button"
-                                onClick={() => navigate("/auth")}
-                                className="rounded-full border border-accent/30 bg-accent/10 px-6 py-3 text-[10px] font-black uppercase tracking-[0.2em] text-accent transition hover:bg-accent/20"
-                            >
-                                Login / Register
-                            </button>
+                            <div className="flex flex-col sm:flex-row gap-3">
+                                <button
+                                    type="button"
+                                    onClick={() => navigate("/auth")}
+                                    className="rounded-full border border-accent/30 bg-accent/10 px-6 py-3 text-[10px] font-black uppercase tracking-[0.2em] text-accent transition hover:bg-accent/20"
+                                >
+                                    Login to Account
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => navigate("/auth", { state: { initialIsLogin: false } })}
+                                    className="rounded-full border border-white/20 bg-white/5 px-6 py-3 text-[10px] font-black uppercase tracking-[0.2em] text-white transition hover:bg-white/10 hover:border-white/30"
+                                >
+                                    Register Account
+                                </button>
+                            </div>
                         )}
                     </div>
                 </header>
@@ -227,11 +236,21 @@ export default function Home() {
                                                 readOnly
                                                 disabled
                                             />
-                                            <p className="mt-2 text-[10px] font-bold uppercase tracking-widest text-emerald-300">
-                                                {isAuthenticated
-                                                    ? "Account username is locked to your signed-in profile."
-                                                    : "Log in first. Joining any room now requires an account."}
-                                            </p>
+                                            <div className="mt-2 flex flex-col gap-1">
+                                                <p className="text-[10px] font-bold uppercase tracking-widest text-emerald-300">
+                                                    {isAuthenticated
+                                                        ? "Account username is locked to your signed-in profile."
+                                                        : "Log in first. Joining any room now requires an account."}
+                                                </p>
+                                                {!isAuthenticated && (
+                                                    <button 
+                                                        onClick={() => navigate("/auth", { state: { initialIsLogin: false } })}
+                                                        className="text-[10px] font-black text-accent uppercase tracking-widest hover:underline text-left"
+                                                    >
+                                                        Don't have an account? Register here
+                                                    </button>
+                                                )}
+                                            </div>
                                         </div>
                                         <div className="flex flex-col">
                                             <label className="text-[10px] text-slate-400 font-black uppercase tracking-[0.2em] mb-2">Select Franchise</label>
@@ -381,10 +400,9 @@ export default function Home() {
                                     <span className="text-xs font-black uppercase tracking-widest italic text-white">The Official Rulebook</span>
                                     <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest mt-1">Master the mechanics of the auction</p>
                                 </div>
-
                             </div>
 
-                            <div className="grid md:grid-cols-2 gap-6 md:gap-8">
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-6 md:gap-8">
                                 <div className="space-y-6">
                                     <div className="space-y-2">
                                         <h4 className="text-[10px] font-black text-accent uppercase tracking-widest flex items-center gap-2">

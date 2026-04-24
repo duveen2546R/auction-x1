@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import { clearSession, getAuthToken } from "../session";
 
 export default function Auth() {
-  const [isLogin, setIsLogin] = useState(true);
+  const { state } = useLocation();
+  const [isLogin, setIsLogin] = useState(state?.initialIsLogin !== false);
   const [username, setUsername] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
