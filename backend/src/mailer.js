@@ -131,13 +131,67 @@ function renderStatCard(label, value, accent = "#67e8f9") {
   `;
 }
 
-async function sendMail({ to, subject, text, html, fallbackLabel }) {
+function parseFromAddress(from) {
+  // Accepts "Name <email@host>" or a bare "email@host".
+  const match = /^(.*)<\s*([^<>\s]+@[^<>\s]+)\s*>\s*$/.exec(from);
+  if (match) {
+    const name = match[1].trim().replace(/^"|"$/g, "");
+    return { email: match[2], name: name || undefined };
+  }
+  return { email: from.trim(), name: undefined };
+}
+
+function getBrevoConfig() {
+  const apiKey = String(process.env.BREVO_API_KEY || "").trim();
+  const senderEmail = String(process.env.BREVO_SENDER_EMAIL || "").trim();
+  const senderName = String(process.env.BREVO_SENDER_NAME || "").trim();
+  const mailFrom = String(process.env.MAIL_FROM || "").trim();
+
+  let sender = null;
+  if (senderEmail) {
+    sender = { email: senderEmail, name: senderName || undefined };
+  } else if (mailFrom) {
+    sender = parseFromAddress(mailFrom);
+  }
+
+  return {
+    apiKey,
+    sender,
+    configured: Boolean(apiKey && sender && sender.email),
+  };
+}
+
+async function sendViaBrevo({ to, subject, text, html }) {
+  const config = getBrevoConfig();
+
+  const response = await fetch("https://api.brevo.com/v3/smtp/email", {
+    method: "POST",
+    headers: {
+      "api-key": config.apiKey,
+      "content-type": "application/json",
+      accept: "application/json",
+    },
+    body: JSON.stringify({
+      sender: config.sender,
+      to: [{ email: to }],
+      subject,
+      textContent: text,
+      htmlContent: html,
+    }),
+  });
+
+  if (!response.ok) {
+    const detail = await response.text().catch(() => "");
+    throw new Error(`Brevo API responded with ${response.status}: ${detail.slice(0, 300)}`);
+  }
+}
+
+async function sendViaSmtp({ to, subject, text, html }) {
   const config = getSmtpConfig();
   const transporter = await getTransporter();
 
   if (!transporter || !config.configured) {
-    console.warn(`SMTP is not configured. ${fallbackLabel}`);
-    return { delivered: false, loggedOnly: true };
+    return false;
   }
 
   await transporter.sendMail({
@@ -148,7 +202,33 @@ async function sendMail({ to, subject, text, html, fallbackLabel }) {
     html,
   });
 
-  return { delivered: true, loggedOnly: false };
+  return true;
+}
+
+async function sendMail({ to, subject, text, html, fallbackLabel }) {
+  const message = { to, subject, text, html };
+  const brevo = getBrevoConfig();
+
+  if (brevo.configured) {
+    try {
+      await sendViaBrevo(message);
+      return { delivered: true, loggedOnly: false, channel: "brevo" };
+    } catch (error) {
+      console.warn(`Brevo send failed, falling back to SMTP: ${error.message}`);
+    }
+  }
+
+  try {
+    if (await sendViaSmtp(message)) {
+      return { delivered: true, loggedOnly: false, channel: "smtp" };
+    }
+  } catch (error) {
+    console.error(`SMTP send failed: ${error.message}`);
+    return { delivered: false, loggedOnly: false, channel: "smtp" };
+  }
+
+  console.warn(`No email channel is configured. ${fallbackLabel}`);
+  return { delivered: false, loggedOnly: true };
 }
 
 export async function sendPasswordResetEmail(email, resetUrl) {
