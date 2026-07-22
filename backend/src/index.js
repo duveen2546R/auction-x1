@@ -30,14 +30,18 @@ app.get("/teams", async (_req, res) => {
 
 const server = http.createServer(app);
 
-// Flexible CORS for Render/Production
-const allowedOrigins = ["http://localhost:5173", process.env.FRONTEND_ORIGIN].filter(Boolean);
-console.log("Allowed CORS Origins:", allowedOrigins.length ? allowedOrigins : "ALL (*)");
+// Flexible CORS for Render/Production.
+// If FRONTEND_ORIGIN is set, restrict to it (+ localhost); otherwise reflect
+// the request origin so the Socket.IO handshake matches the permissive REST layer.
+const explicitOrigins = ["http://localhost:5173", process.env.FRONTEND_ORIGIN].filter(Boolean);
+const corsOrigin = process.env.FRONTEND_ORIGIN ? explicitOrigins : true;
+console.log("Allowed CORS Origins:", process.env.FRONTEND_ORIGIN ? explicitOrigins : "ALL (reflect origin)");
 
 const io = new Server(server, {
   cors: {
-    origin: allowedOrigins.length ? allowedOrigins : true,
+    origin: corsOrigin,
     methods: ["GET", "POST"],
+    credentials: true,
   },
 });
 
