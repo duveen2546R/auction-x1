@@ -208,17 +208,18 @@ auction-x1-main/
 ├── backend/
 │   ├── db/
 │   │   └── schema.sql
+│   ├── test/
 │   ├── src/
-│   │   ├── auth.js
-│   │   ├── db.js
-│   │   ├── env.js
+│   │   ├── config/
+│   │   ├── data/
+│   │   ├── middleware/
+│   │   ├── repositories/
+│   │   ├── routes/
+│   │   ├── services/
+│   │   ├── socket/
+│   │   ├── utils/
+│   │   ├── app.js
 │   │   ├── index.js
-│   │   ├── playerStore.js
-│   │   ├── routes.js
-│   │   ├── roomSessions.js
-│   │   ├── runtimeRooms.js
-│   │   ├── teamStore.js
-│   │   └── data/
 │   └── package.json
 ├── frontend/
 │   ├── public/
@@ -230,6 +231,15 @@ auction-x1-main/
 │   └── package.json
 └── README.md
 ```
+
+Backend responsibilities are separated as follows:
+
+- `index.js` and `app.js` handle process and Express startup only
+- `routes/` contains domain-specific HTTP routers
+- `socket/` contains the real-time auction runtime and event bindings
+- `services/` contains auction rules, room creation, queueing, and email workflows
+- `repositories/` contains auction persistence queries
+- `middleware/`, `config/`, and `utils/` contain shared cross-cutting concerns
 
 ## Pages
 

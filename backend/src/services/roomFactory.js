@@ -1,0 +1,47 @@
+import { organizePlayersIntoSets } from "./playerQueue.js";
+
+export function createRoom(roomId, players) {
+  const now = Date.now();
+
+  return {
+    roomId,
+    dbId: null,
+    sessionNumber: 1,
+    visibility: "private",
+    creatorUserId: null,
+    creatorName: null,
+    creatorTeamName: null,
+    createdAt: now,
+    playersQueue: organizePlayersIntoSets(players),
+    idx: 0,
+    users: new Map(),
+    voiceUsers: new Set(),
+    currentPlayer: null,
+    currentBid: 0,
+    highestBidder: null,
+    highestBidderUserId: null,
+    highestBidderName: null,
+    timer: null,
+    timeLeft: 0,
+    status: "waiting",
+    lastBidAt: now,
+    lastActivityAt: now,
+    warnedOnce: false,
+    warnedTwice: false,
+    totalDuration: 13000,
+    bidHistory: [],
+    passedUsers: new Set(),
+    skipPoolUsers: new Set(),
+    blockedUsers: new Set(),
+    withdrawnUsers: new Set(),
+    playing11: new Map(),
+    playing11Drafts: new Map(),
+    disqualified: new Set(),
+    finalizingBid: false,
+    finalizingPlaying11: false,
+    disconnectTimeouts: new Map(),
+    closeTimeout: null,
+    phaseStartedAt: now,
+    restoredFromDb: false,
+  };
+}
